@@ -21,7 +21,7 @@
 ### 安装依赖
 
 ```bash
-pip install streamlit pandas plotly
+pip install streamlit pandas plotly matplotlib
 ```
 
 ### 启动
@@ -63,6 +63,7 @@ streamlit run perf_kanban.py sample_data/
 
 - Speedup 列按阈值着色：绿色 = 提升，红色 = 回归
 - 底部柱状图支持自选用例，避免全量用例单位差异导致的图表失真
+- 一键导出：Markdown 格式（含 Geomean Speedup 摘要，适合 PR）/ JPG 图片
 
 ### Tab 2: 用例替换
 

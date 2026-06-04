@@ -8,10 +8,12 @@
 """
 
 import sys
+import io
 import os
 import json
 import statistics
 from dataclasses import dataclass, field
+from math import exp, log
 from pathlib import Path
 from typing import Optional
 
@@ -368,7 +370,308 @@ def apply_speedup_styling(
 
 
 # =============================================================================
-# Caching Layer
+# Export Layer — 导出为 Markdown / 图片
+# =============================================================================
+
+def _flatten_df_for_export(df: pd.DataFrame) -> list[dict]:
+    """
+    将 MultiIndex DataFrame 展平为导出友好的列规格列表。
+    值+单位合并为一列。返回 [{"type", "header", "col"/"val_col"/"unit_col"}, ...]
+    """
+    specs = []
+    cols = list(df.columns)
+    i = 0
+    while i < len(cols):
+        col = cols[i]
+        if not isinstance(col, tuple):
+            specs.append({"type": "raw", "header": str(col), "col": col})
+            i += 1
+            continue
+
+        top, sub = col
+        if sub == "用例名":
+            specs.append({"type": "raw", "header": "Benchmark", "col": col})
+            i += 1
+        elif sub == "值":
+            label = top if top else "Baseline"
+            unit_col = (top, "单位")
+            specs.append({
+                "type": "value_unit", "header": label,
+                "val_col": col, "unit_col": unit_col,
+            })
+            i += 2  # skip 值 + 单位
+        elif sub == "单位":
+            i += 1  # handled by 值
+        elif sub == "Speedup":
+            specs.append({"type": "speedup", "header": "Speedup", "col": col})
+            i += 1
+        elif sub == "趋势":
+            specs.append({"type": "raw", "header": "Trend", "col": col})
+            i += 1
+        else:
+            specs.append({
+                "type": "raw",
+                "header": f"{top} {sub}" if top else sub,
+                "col": col,
+            })
+            i += 1
+    return specs
+
+
+def _fmt(val):
+    """Format a cell value, handling None/NaN"""
+    if val is None:
+        return "-"
+    if isinstance(val, float) and pd.isna(val):
+        return "-"
+    return str(val)
+
+
+def _geomean_speedup(
+    df: pd.DataFrame, speedup_cols: list[tuple]
+) -> dict[str, float]:
+    """计算每个 candidate 的 Speedup 几何平均"""
+    results = {}
+    for col in speedup_cols:
+        if col not in df.columns:
+            continue
+        vals = pd.to_numeric(df[col], errors="coerce").dropna()
+        positive = vals[vals > 0]
+        if len(positive) == 0:
+            continue
+        try:
+            gm = exp(sum(log(v) for v in positive) / len(positive))
+            results[col[0]] = gm
+        except (ValueError, ZeroDivisionError):
+            pass
+    return results
+
+
+def export_df_to_markdown(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    improve_thresh: float,
+    regress_thresh: float,
+    baseline_label: str = "",
+) -> str:
+    """将对比/趋势表格导出为 Markdown 格式（值+单位合并）"""
+    lines = []
+
+    if baseline_label:
+        lines.append(f"**Baseline:** `{baseline_label}`")
+        lines.append("")
+
+    # Geomean summary
+    gmeans = _geomean_speedup(df, speedup_cols)
+    if gmeans:
+        parts = [f"{name}: {v:.4f}x" for name, v in gmeans.items()]
+        lines.append("**Geomean Speedup:** " + " | ".join(parts))
+        lines.append("")
+
+    specs = _flatten_df_for_export(df)
+    headers = [s["header"] for s in specs]
+
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+
+    for _, row in df.iterrows():
+        cells = []
+        for s in specs:
+            t = s["type"]
+            if t == "speedup":
+                val = row.get(s["col"])
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    try:
+                        v = float(val)
+                        text = f"{v:.4f}"
+                        if v >= improve_thresh or v <= regress_thresh:
+                            text = f"**{text}**"
+                        cells.append(text)
+                    except (ValueError, TypeError):
+                        cells.append(_fmt(val))
+                else:
+                    cells.append("-")
+            elif t == "value_unit":
+                val = row.get(s["val_col"])
+                unit = row.get(s["unit_col"], "")
+                val_str = _fmt(val)
+                if val_str != "-" and unit and str(unit) != "—":
+                    cells.append(f"{val_str} {unit}")
+                else:
+                    cells.append(val_str)
+            else:
+                cells.append(_fmt(row.get(s.get("col"))))
+        lines.append("| " + " | ".join(cells) + " |")
+
+    return "\n".join(lines)
+
+
+# 图表中 CJK 文字 → ASCII 替换（避免字体缺失）
+_IMAGE_TEXT_MAP = {
+    "↑ 提升": "Improve", "↓ 回归": "Regress", "↔ 波动": "Stable",
+    "— 单点": "Single", "—": "-",
+}
+
+
+def _setup_matplotlib_cjk():
+    """为 matplotlib 配置 CJK 字体，返回是否成功"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
+
+    cjk_names = [
+        "Droid Sans", "WenQuanYi Micro Hei", "Noto Sans CJK SC",
+        "Noto Sans SC", "Source Han Sans SC", "SimHei",
+        "Microsoft YaHei", "AR PL UMing CN",
+    ]
+    for name in cjk_names:
+        try:
+            fp = fm.findfont(fm.FontProperties(family=name), fallback_to_default=False)
+            if fp and "lastresort" not in str(fp).lower():
+                plt.rcParams["font.sans-serif"] = [name] + plt.rcParams.get(
+                    "font.sans-serif", []
+                )
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def export_df_to_image(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    improve_thresh: float,
+    regress_thresh: float,
+    baseline_label: str = "",
+) -> bytes:
+    """将表格导出为 JPG 图片（matplotlib 渲染，Speedup 列着色）"""
+    import matplotlib.pyplot as plt
+
+    _setup_matplotlib_cjk()
+
+    specs = _flatten_df_for_export(df)
+    headers = [s["header"] for s in specs]
+    n_cols = len(headers)
+
+    # Build cell text and colors
+    all_text = [headers]
+    all_colors = [["#4472C4"] * n_cols]  # header row: blue
+
+    for _, row in df.iterrows():
+        row_text = []
+        row_colors = []
+        for s in specs:
+            t = s["type"]
+            if t == "speedup":
+                val = row.get(s["col"])
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    try:
+                        v = float(val)
+                        row_text.append(f"{v:.4f}")
+                        if v >= improve_thresh:
+                            row_colors.append("#c6efce")
+                        elif v <= regress_thresh:
+                            row_colors.append("#ffc7ce")
+                        else:
+                            row_colors.append("#ffffff")
+                    except (ValueError, TypeError):
+                        row_text.append(_fmt(val))
+                        row_colors.append("#ffffff")
+                else:
+                    row_text.append("-")
+                    row_colors.append("#ffffff")
+            elif t == "value_unit":
+                val = row.get(s["val_col"])
+                unit = row.get(s["unit_col"], "")
+                val_str = _fmt(val)
+                if val_str != "-" and unit and str(unit) != "—":
+                    row_text.append(f"{val_str} {unit}")
+                else:
+                    row_text.append(val_str)
+                row_colors.append("#ffffff")
+            else:
+                raw_val = _fmt(row.get(s.get("col")))
+                row_text.append(_IMAGE_TEXT_MAP.get(raw_val, raw_val))
+                row_colors.append("#ffffff")
+        all_text.append(row_text)
+        all_colors.append(row_colors)
+
+    total_rows = len(all_text)
+
+    # Figure sizing
+    fig_w = max(8, n_cols * 1.6)
+    fig_h = max(3, total_rows * 0.42 + 0.8)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.axis("off")
+
+    if baseline_label:
+        ax.set_title(f"Baseline: {baseline_label}", fontsize=10, loc="left", pad=12)
+
+    table = ax.table(
+        cellText=all_text,
+        cellColours=all_colors,
+        cellLoc="center",
+        loc="center",
+    )
+
+    # Header style: white bold text
+    for j in range(n_cols):
+        table[0, j].set_text_props(color="white", fontweight="bold", fontsize=9)
+
+    # Data rows
+    for i in range(1, total_rows):
+        for j in range(n_cols):
+            table[i, j].set_text_props(fontsize=8)
+
+    table.auto_set_font_size(False)
+    table.scale(1, 1.35)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="jpg", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def _render_export_buttons(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    improve_thresh: float,
+    regress_thresh: float,
+    baseline_label: str,
+    file_prefix: str,
+):
+    """渲染导出按钮（Markdown + JPG）"""
+    st.subheader("导出")
+    col_md, col_jpg = st.columns(2)
+
+    with col_md:
+        md_text = export_df_to_markdown(
+            df, speedup_cols, improve_thresh, regress_thresh, baseline_label
+        )
+        st.download_button(
+            "导出 Markdown",
+            data=md_text,
+            file_name=f"{file_prefix}.md",
+            mime="text/markdown",
+        )
+
+    with col_jpg:
+        try:
+            img_bytes = export_df_to_image(
+                df, speedup_cols, improve_thresh, regress_thresh, baseline_label
+            )
+            st.download_button(
+                "导出 JPG",
+                data=img_bytes,
+                file_name=f"{file_prefix}.jpg",
+                mime="image/jpeg",
+            )
+        except Exception as e:
+            st.warning(f"JPG 导出失败（需要 matplotlib）: {e}")
+
+
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
@@ -536,6 +839,13 @@ def render_tab_comparison(config: dict):
     styled = apply_speedup_styling(df_filtered, improve_t, regress_t, speedup_cols)
     st.dataframe(styled, width="stretch", height=600)
 
+    # 导出按钮
+    if not df_filtered.empty:
+        _render_export_buttons(
+            df_filtered, speedup_cols, improve_t, regress_t,
+            baseline.name, "comparison",
+        )
+
     # 自选用例 Speedup 柱状图
     if not df_filtered.empty and speedup_cols:
         st.subheader("Speedup 柱状图")
@@ -677,6 +987,13 @@ def render_tab_trend(config: dict):
     # 应用样式
     styled = apply_speedup_styling(df, improve_t, regress_t, speedup_cols)
     st.dataframe(styled, width="stretch", height=600)
+
+    # 导出按钮
+    if not df.empty:
+        _render_export_buttons(
+            df, speedup_cols, improve_t, regress_t,
+            baseline.name, "trend",
+        )
 
     # 自选用例 Speedup 趋势图
     st.subheader("单用例趋势图")
