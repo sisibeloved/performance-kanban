@@ -1,4 +1,10 @@
-"""生成模拟 pyperformance 测试数据用于端到端验证"""
+"""生成模拟 pyperformance 测试数据用于端到端验证
+
+格式对齐真实 pyperf JSON：
+- benchmark name 在 benchmarks[].metadata.name
+- 多个 runs，每个 run 含 warmups + values
+- calibration run 只有 warmups 没有 values
+"""
 import json
 import os
 import random
@@ -6,7 +12,7 @@ import tempfile
 
 BENCHMARKS = [
     "2to3", "chameleon", "chaos", "crypto_pyaes", "delve",
-    "djangocms", "dulwich_log", "fannkuch", "float", "genshi_text",
+    "dulwich_log", "fannkuch", "float", "genshi_text",
     "genshi_xml", "go", "hexiom", "html5lib", "json_dumps",
     "json_loads", "logging", "mako", "meteor_contest", "nbody",
     "nqueens", "pathlib", "pickle", "pickle_dict", "pickle_list",
@@ -21,6 +27,30 @@ BENCHMARKS = [
 ]
 
 
+def _make_runs(mean_time: float, loops: int = 1) -> list[dict]:
+    """生成模拟 runs：一个 calibration run + 3个采样 run"""
+    runs = []
+
+    # Calibration run: 只有 warmups，没有 values
+    warmup_vals = [mean_time * random.uniform(1.05, 1.15) for _ in range(5)]
+    runs.append({
+        "metadata": {"calibrate_loops": loops},
+        "warmups": [[loops, v] for v in warmup_vals],
+    })
+
+    # 3 sampling runs: 各有 warmups + values
+    for _ in range(3):
+        run_warmups = [mean_time * random.uniform(1.02, 1.08) for _ in range(3)]
+        run_values = [mean_time * random.uniform(0.97, 1.03) for _ in range(10)]
+        runs.append({
+            "metadata": {"duration": round(random.uniform(2.0, 10.0), 2)},
+            "values": run_values,
+            "warmups": [[loops, v] for v in run_warmups],
+        })
+
+    return runs
+
+
 def generate_file(
     output_dir: str,
     name: str,
@@ -30,7 +60,7 @@ def generate_file(
     speed_factor: float = 1.0,
     missing: list[str] = None,
 ) -> str:
-    """生成一个模拟的 pyperf JSON 文件"""
+    """生成一个模拟的 pyperf JSON 文件（对齐真实格式）"""
     missing = missing or []
     benchmarks = []
     for bench_name in BENCHMARKS:
@@ -38,17 +68,16 @@ def generate_file(
             continue
         base_time = random.uniform(0.001, 1.0)
         mean_time = base_time * speed_factor
-        # 生成 5 个采样值，带轻微随机波动
-        values = [mean_time * random.uniform(0.97, 1.03) for _ in range(5)]
+        loops = random.choice([1, 4, 10, 20])
+
         benchmarks.append({
-            "runs": [{
-                "values": values,
-                "metadata": {
-                    "name": bench_name,
-                    "loops": 10,
-                    "inner_loops": 1,
-                },
-            }],
+            "metadata": {
+                "name": bench_name,
+                "loops": loops,
+                "inner_loops": 1,
+                "description": f"Performance of {bench_name}",
+            },
+            "runs": _make_runs(mean_time, loops),
         })
 
     data = {
@@ -60,7 +89,10 @@ def generate_file(
             "commit_branch": "main",
             "hostname": "test-machine",
             "cpu_model_name": "Test CPU",
+            "performance_version": "1.14.0",
+            "unit": "second",
         },
+        "version": "1.0",
     }
 
     path = os.path.join(output_dir, name)

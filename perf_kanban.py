@@ -41,19 +41,36 @@ class BenchmarkData:
     benchmarks: dict[str, BenchmarkResult] = field(default_factory=dict)
 
 
+def _extract_python_version(metadata: dict) -> str:
+    """尝试从 metadata 或 benchmark command 中提取 Python 版本"""
+    # 直接字段
+    for key in ("python_version", "python_implementation_version"):
+        v = metadata.get(key, "")
+        if v:
+            return v
+    return ""
+
+
+def _extract_commit(metadata: dict) -> str:
+    """尝试从 metadata 提取 commit id"""
+    for key in ("commit_id", "commit", "git_commit"):
+        v = metadata.get(key, "")
+        if v:
+            return v[:8]
+    return ""
+
+
 def _derive_label(metadata: dict, filename: str) -> str:
-    """从 metadata 推导可读标签"""
+    """从 metadata 推导可读标签，确保可辨识"""
     parts = []
-    py_ver = metadata.get("python_version", "")
+    py_ver = _extract_python_version(metadata)
     if py_ver:
         parts.append(py_ver)
-    commit = metadata.get("commit_id", "")
+    commit = _extract_commit(metadata)
     if commit:
-        parts.append(commit[:8])
-    platform = metadata.get("platform", "")
-    if platform:
-        parts.append(platform)
+        parts.append(commit)
     if not parts:
+        # 无版本信息时用文件名，保证唯一性
         parts.append(Path(filename).stem)
     return " @ ".join(parts) if len(parts) <= 2 else " | ".join(parts)
 
@@ -71,11 +88,17 @@ def load_benchmark(path: str) -> BenchmarkData:
         if not runs:
             continue
 
-        # 用第一个 run 的 metadata.name 作为用例名
-        run_meta = runs[0].get("metadata", {})
-        bench_name = run_meta.get("name", "unknown")
+        # 用例名：优先从 benchmark 级 metadata 取（真实 pyperf），
+        # 回退到第一个 run 的 metadata（兼容旧格式模拟数据）
+        bench_meta = bench_entry.get("metadata", {})
+        bench_name = bench_meta.get("name", "")
+        if not bench_name:
+            run_meta = runs[0].get("metadata", {})
+            bench_name = run_meta.get("name", "unknown")
+        else:
+            run_meta = bench_meta
 
-        # 合并所有 run 的 values
+        # 合并所有 run 的 values（跳过只有 warmups 的 calibration run）
         all_values: list[float] = []
         for run in runs:
             vals = run.get("values", [])
@@ -408,10 +431,22 @@ def render_sidebar() -> dict:
 
         # 加载选中的文件
         loaded: dict[str, BenchmarkData] = {}
+        seen_labels: dict[str, int] = {}  # label -> count，用于消重
         for fname in selected_files:
             path = file_options[fname]
             try:
                 data = cached_load_benchmark(path)
+                # 确保标签唯一：若重复则追加文件名
+                label = data.name
+                if label in seen_labels:
+                    data.name = f"{label} ({fname})"
+                    # 也更新先前的
+                    for prev_fname, prev_data in loaded.items():
+                        if prev_data.name == label:
+                            prev_data.name = f"{label} ({prev_fname})"
+                    seen_labels[label] += 1
+                else:
+                    seen_labels[label] = 1
                 loaded[fname] = data
             except Exception as e:
                 st.error(f"加载 `{fname}` 失败: {e}")
