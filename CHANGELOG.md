@@ -6,6 +6,22 @@
 
 ---
 
+## [0.2.0] - 2026-06-03
+
+### 修复
+
+- **适配真实 pyperf JSON 格式**：benchmark name 从 `benchmarks[].metadata.name` 读取，回退兼容旧格式（`runs[].metadata.name`）
+- **标签冲突消重**：多个文件产生相同标签时自动追加文件名，避免 MultiIndex 列重复导致 Styler 崩溃（Closes #1）
+- **模拟数据对齐真实格式**：`generate_sample_data.py` 使用多 run + warmups + calibration run 结构
+
+### 新增
+
+- **一键导出 Markdown**：对比表 / 趋势表导出为 Markdown 格式，值+单位合并，Speedup 显著值加粗，含 Geomean Speedup 摘要
+- **一键导出 JPG**：matplotlib 渲染带颜色的表格图片，Speedup 列绿/红着色与 UI 一致
+- **用例选择器共享**：对比表格与 Speedup 柱状图共享同一个用例选择器，选中即展示，取消即隐藏
+
+---
+
 ## [0.1.0] - 2026-05-30
 
 ### 新增

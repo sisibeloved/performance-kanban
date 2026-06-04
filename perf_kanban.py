@@ -822,48 +822,51 @@ def render_tab_comparison(config: dict):
         st.warning("没有可对比的用例")
         return
 
-    # 是否启用筛选
+    # Speedup 阈值筛选
     filtering = filter_low > 0.0 or filter_high < 5.0
     if filtering:
         df_filtered = filter_df_by_speedup(df, filter_low, filter_high, speedup_cols)
     else:
         df_filtered = df
 
+    # 用例选择器（表格 + 柱状图共享）
+    name_col = ("", "用例名")
+    available_cases = df_filtered[name_col].tolist()
+    selected_cases = st.multiselect(
+        "选择用例",
+        options=available_cases,
+        default=available_cases,
+    )
+
+    # 根据选中用例过滤
+    if selected_cases:
+        df_display = df_filtered[df_filtered[name_col].isin(selected_cases)]
+    else:
+        df_display = df_filtered
+
     # 统计信息
     col1, col2, col3 = st.columns(3)
     col1.metric("用例总数", len(df))
     col2.metric("候选数", len(candidates))
-    col3.metric("筛选命中", len(df_filtered))
+    col3.metric("当前显示", len(df_display))
 
     # 应用样式（含列宽）
-    styled = apply_speedup_styling(df_filtered, improve_t, regress_t, speedup_cols)
+    styled = apply_speedup_styling(df_display, improve_t, regress_t, speedup_cols)
     st.dataframe(styled, width="stretch", height=600)
 
     # 导出按钮
-    if not df_filtered.empty:
+    if not df_display.empty:
         _render_export_buttons(
-            df_filtered, speedup_cols, improve_t, regress_t,
+            df_display, speedup_cols, improve_t, regress_t,
             baseline.name, "comparison",
         )
 
-    # 自选用例 Speedup 柱状图
-    if not df_filtered.empty and speedup_cols:
+    # Speedup 柱状图（复用选中用例）
+    if not df_display.empty and speedup_cols:
         st.subheader("Speedup 柱状图")
-        name_col = ("", "用例名")
-        available_cases = df_filtered[name_col].tolist()
-        selected_cases = st.multiselect(
-            "选择要展示的用例",
-            options=available_cases,
-            default=available_cases[:5] if len(available_cases) <= 5 else [],
-        )
-        if selected_cases:
-            mask = df_filtered[name_col].isin(selected_cases)
-            chart_df = df_filtered[mask].set_index(name_col)[speedup_cols]
-            # 列名从 tuple 简化为 candidate 名
-            chart_df.columns = [c[0] for c in chart_df.columns]
-            st.bar_chart(chart_df, horizontal=True)
-        else:
-            st.caption("请在上方选择至少一个用例")
+        chart_df = df_display.set_index(name_col)[speedup_cols]
+        chart_df.columns = [c[0] for c in chart_df.columns]
+        st.bar_chart(chart_df, horizontal=True)
 
 
 def render_tab_replacement(config: dict):
