@@ -15,6 +15,9 @@ from perf_kanban import (
     merge_benchmarks,
     filter_df_by_speedup,
     get_all_benchmark_names,
+    export_df_to_markdown,
+    export_df_to_image,
+    _geomean_speedup,
 )
 
 
@@ -156,6 +159,104 @@ def test_filter_by_speedup():
     print("  [PASS] test_filter_by_speedup")
 
 
+def test_export_markdown_comparison():
+    """测试对比表格 Markdown 导出"""
+    p1 = make_json_file({"2to3": 0.2, "regex": 0.1}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"2to3": 0.1, "regex": 0.2}, {"python_version": "3.13.0"})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+
+    md = export_df_to_markdown(df, speedup_cols, 1.05, 0.95, baseline_label="3.12.0")
+
+    # 包含 baseline 信息
+    assert "**Baseline:** `3.12.0`" in md
+    # 包含 Geomean
+    assert "Geomean Speedup" in md
+    # Markdown 表格格式
+    assert "| Benchmark |" in md
+    assert "| --- |" in md
+    # 2to3 speedup = 0.2/0.1 = 2.0 (>= 1.05, 加粗)
+    assert "**2.0000**" in md
+    # regex speedup = 0.1/0.2 = 0.5 (<= 0.95, 加粗)
+    assert "**0.5000**" in md
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_export_markdown_comparison")
+
+
+def test_export_markdown_trend():
+    """测试趋势表格 Markdown 导出"""
+    p1 = make_json_file({"2to3": 0.2}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"2to3": 0.19}, {"python_version": "3.13.0a1"})
+    p3 = make_json_file({"2to3": 0.17}, {"python_version": "3.13.0b1"})
+
+    base = load_benchmark(p1)
+    cands = [load_benchmark(p) for p in [p2, p3]]
+    names = get_all_benchmark_names([base] + cands)
+    df, speedup_cols = build_trend_df(base, cands, names)
+
+    md = export_df_to_markdown(df, speedup_cols, 1.05, 0.95, baseline_label="3.12.0")
+
+    # 趋势表包含 baseline 列和 Trend 列
+    assert "| Benchmark |" in md
+    assert "baseline |" in md
+    assert "| Trend |" in md
+    # 2to3 趋势为 ↑ 提升
+    assert "↑ 提升" in md
+
+    for p in [p1, p2, p3]:
+        os.unlink(p)
+    print("  [PASS] test_export_markdown_trend")
+
+
+def test_geomean_speedup():
+    """测试 Geomean Speedup 计算"""
+    p1 = make_json_file({"a": 1.0, "b": 1.0, "c": 1.0})
+    p2 = make_json_file({"a": 0.5, "b": 1.0, "c": 2.0})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+
+    gmeans = _geomean_speedup(df, speedup_cols)
+    assert len(gmeans) == 1
+    # speedups: 2.0, 1.0, 0.5 → geomean = (2.0 * 1.0 * 0.5)^(1/3) = 1.0
+    gm_val = list(gmeans.values())[0]
+    assert abs(gm_val - 1.0) < 1e-6
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_geomean_speedup")
+
+
+def test_export_image():
+    """测试 JPG 图片导出"""
+    p1 = make_json_file({"2to3": 0.2, "regex": 0.1}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"2to3": 0.1, "regex": 0.2}, {"python_version": "3.13.0"})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+
+    img_bytes = export_df_to_image(df, speedup_cols, 1.05, 0.95, baseline_label="3.12.0")
+
+    # 返回有效的 JPG 字节
+    assert isinstance(img_bytes, bytes)
+    assert len(img_bytes) > 1000
+    # JPEG magic bytes: FF D8 FF
+    assert img_bytes[:3] == b'\xff\xd8\xff'
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_export_image")
+
+
 if __name__ == "__main__":
     print("Running Data Layer tests...")
     test_load_benchmark()
@@ -164,4 +265,8 @@ if __name__ == "__main__":
     test_trend_df()
     test_merge_benchmarks()
     test_filter_by_speedup()
+    test_export_markdown_comparison()
+    test_export_markdown_trend()
+    test_geomean_speedup()
+    test_export_image()
     print("\nAll tests passed!")
