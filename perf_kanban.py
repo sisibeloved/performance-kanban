@@ -160,11 +160,20 @@ def build_comparison_df(
 ) -> tuple[pd.DataFrame, list[tuple]]:
     """
     构建对比表格 DataFrame（MultiIndex 二级表头）。
+    baseline 两列：绝对值 | 单位
     每个 candidate 三列：绝对值 | 单位 | Speedup
     返回 (DataFrame, speedup列名元组列表)
     """
     # 构建 MultiIndex 列
-    col_tuples: list[tuple] = [("", "用例名")]
+    base_label = baseline.name or "baseline"
+    # 避免 baseline 列名与某个 candidate 同名（否则产生重复列）
+    if base_label in {c.name for c in candidates}:
+        base_label = f"{base_label} (baseline)"
+    col_tuples: list[tuple] = [
+        ("", "用例名"),
+        (base_label, "值"),
+        (base_label, "单位"),
+    ]
     for cand in candidates:
         col_tuples.append((cand.name, "值"))
         col_tuples.append((cand.name, "单位"))
@@ -179,8 +188,9 @@ def build_comparison_df(
         if base_result is None:
             continue
         base_mean = base_result.mean
+        base_val, base_unit = _format_time(base_mean)
 
-        row = [name]
+        row = [name, base_val, base_unit]
         for cand in candidates:
             cand_result = cand.benchmarks.get(name)
             if cand_result is None:
@@ -369,6 +379,46 @@ def apply_speedup_styling(
     return styler
 
 
+def flatten_comparison_df(
+    df: pd.DataFrame, speedup_cols: list[tuple]
+) -> tuple[pd.DataFrame, list[str], dict[str, int]]:
+    """
+    将 MultiIndex 对比表拍平为单层列名，便于 st.dataframe 用固定像素列宽对齐。
+    返回 (flat_df, flat_speedup_cols, widths)。widths 为 {列名: 像素宽}。
+    """
+    speedup_set = set(speedup_cols)
+    new_cols: list[str] = []
+    flat_speedup: list[str] = []
+    widths: dict[str, int] = {}
+
+    for col in df.columns:
+        if isinstance(col, tuple):
+            top, sub = col
+            if sub == "用例名":
+                label, width = "用例名", 200
+            elif sub == "值":
+                label, width = (f"{top} 值" if top else "值"), 100
+            elif sub == "单位":
+                label, width = (f"{top} 单位" if top else "单位"), 60
+            elif sub == "Speedup":
+                label, width = f"{top} Speedup", 110
+            elif sub == "趋势":
+                label, width = "趋势", 90
+            else:
+                label, width = (f"{top} {sub}".strip() or sub), 100
+        else:
+            label, width = str(col), 100
+
+        if col in speedup_set:
+            flat_speedup.append(label)
+        new_cols.append(label)
+        widths[label] = width
+
+    flat = df.copy()
+    flat.columns = new_cols
+    return flat, flat_speedup, widths
+
+
 # =============================================================================
 # Export Layer — 导出为 Markdown / 图片
 # =============================================================================
@@ -427,6 +477,23 @@ def _fmt(val):
     return str(val)
 
 
+def _sort_df_for_export(
+    df: pd.DataFrame,
+    export_sort_by=None,
+    export_sort_ascending: bool = True,
+) -> pd.DataFrame:
+    """Return an export-only sorted view without mutating the table DataFrame."""
+    if export_sort_by is None or df.empty or export_sort_by not in df.columns:
+        return df
+
+    return df.sort_values(
+        by=export_sort_by,
+        ascending=export_sort_ascending,
+        na_position="last",
+        kind="mergesort",
+    )
+
+
 def _geomean_speedup(
     df: pd.DataFrame, speedup_cols: list[tuple]
 ) -> dict[str, float]:
@@ -447,14 +514,39 @@ def _geomean_speedup(
     return results
 
 
+def build_gmean_row(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    name_col: tuple = ("", "用例名"),
+) -> pd.DataFrame:
+    """
+    构建几何平均行（单行 DataFrame，列与对比表一致）。
+    几何平均仅填入 Speedup 列，其余列留空。
+    """
+    gmeans = _geomean_speedup(df, speedup_cols)
+    row: dict = {}
+    for col in df.columns:
+        if col == name_col:
+            row[col] = "几何平均"
+        elif col in speedup_cols:
+            top = col[0]
+            row[col] = round(gmeans[top], 4) if top in gmeans else None
+        else:
+            row[col] = ""
+    return pd.DataFrame([row], columns=df.columns)
+
+
 def export_df_to_markdown(
     df: pd.DataFrame,
     speedup_cols: list[tuple],
     improve_thresh: float,
     regress_thresh: float,
     baseline_label: str = "",
+    export_sort_by=None,
+    export_sort_ascending: bool = True,
 ) -> str:
     """将对比/趋势表格导出为 Markdown 格式（值+单位合并）"""
+    export_df = _sort_df_for_export(df, export_sort_by, export_sort_ascending)
     lines = []
 
     if baseline_label:
@@ -462,19 +554,19 @@ def export_df_to_markdown(
         lines.append("")
 
     # Geomean summary
-    gmeans = _geomean_speedup(df, speedup_cols)
+    gmeans = _geomean_speedup(export_df, speedup_cols)
     if gmeans:
         parts = [f"{name}: {v:.4f}x" for name, v in gmeans.items()]
         lines.append("**Geomean Speedup:** " + " | ".join(parts))
         lines.append("")
 
-    specs = _flatten_df_for_export(df)
+    specs = _flatten_df_for_export(export_df)
     headers = [s["header"] for s in specs]
 
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("| " + " | ".join("---" for _ in headers) + " |")
 
-    for _, row in df.iterrows():
+    for _, row in export_df.iterrows():
         cells = []
         for s in specs:
             t = s["type"]
@@ -544,13 +636,16 @@ def export_df_to_image(
     improve_thresh: float,
     regress_thresh: float,
     baseline_label: str = "",
+    export_sort_by=None,
+    export_sort_ascending: bool = True,
 ) -> bytes:
     """将表格导出为 JPG 图片（matplotlib 渲染，Speedup 列着色）"""
     import matplotlib.pyplot as plt
 
     _setup_matplotlib_cjk()
 
-    specs = _flatten_df_for_export(df)
+    export_df = _sort_df_for_export(df, export_sort_by, export_sort_ascending)
+    specs = _flatten_df_for_export(export_df)
     headers = [s["header"] for s in specs]
     n_cols = len(headers)
 
@@ -558,7 +653,7 @@ def export_df_to_image(
     all_text = [headers]
     all_colors = [["#4472C4"] * n_cols]  # header row: blue
 
-    for _, row in df.iterrows():
+    for _, row in export_df.iterrows():
         row_text = []
         row_colors = []
         for s in specs:
@@ -641,6 +736,8 @@ def _render_export_buttons(
     regress_thresh: float,
     baseline_label: str,
     file_prefix: str,
+    export_sort_by=None,
+    export_sort_ascending: bool = True,
 ):
     """渲染导出按钮（Markdown + JPG）"""
     st.subheader("导出")
@@ -648,7 +745,13 @@ def _render_export_buttons(
 
     with col_md:
         md_text = export_df_to_markdown(
-            df, speedup_cols, improve_thresh, regress_thresh, baseline_label
+            df,
+            speedup_cols,
+            improve_thresh,
+            regress_thresh,
+            baseline_label,
+            export_sort_by=export_sort_by,
+            export_sort_ascending=export_sort_ascending,
         )
         st.download_button(
             "导出 Markdown",
@@ -660,7 +763,13 @@ def _render_export_buttons(
     with col_jpg:
         try:
             img_bytes = export_df_to_image(
-                df, speedup_cols, improve_thresh, regress_thresh, baseline_label
+                df,
+                speedup_cols,
+                improve_thresh,
+                regress_thresh,
+                baseline_label,
+                export_sort_by=export_sort_by,
+                export_sort_ascending=export_sort_ascending,
             )
             st.download_button(
                 "导出 JPG",
@@ -850,9 +959,46 @@ def render_tab_comparison(config: dict):
     col2.metric("候选数", len(candidates))
     col3.metric("当前显示", len(df_display))
 
-    # 应用样式（含列宽）
-    styled = apply_speedup_styling(df_display, improve_t, regress_t, speedup_cols)
-    st.dataframe(styled, width="stretch", height=600)
+    # 拍平为单层表头 + 固定像素列宽，使主表与几何平均行严格对齐
+    flat_df, flat_speedup, widths = flatten_comparison_df(df_display, speedup_cols)
+
+    # 用例名 + baseline 值/单位 固定在左侧（横向滚动候选列时常驻可见）
+    base_top = df_display.columns[1][0]  # baseline 列头（拍平前）
+    pinned_orig = {("", "用例名"), (base_top, "值"), (base_top, "单位")}
+    pinned_labels = {
+        flat_label
+        for orig, flat_label in zip(df_display.columns, flat_df.columns)
+        if orig in pinned_orig
+    }
+
+    col_config = {
+        label: st.column_config.Column(
+            width=w,
+            alignment="right" if (label in flat_speedup or label.endswith("值")) else None,
+            pinned=label in pinned_labels,
+        )
+        for label, w in widths.items()
+    }
+
+    # 应用样式（Speedup 颜色编码）
+    styled = apply_speedup_styling(flat_df, improve_t, regress_t, flat_speedup)
+    st.dataframe(
+        styled, width="stretch", height=600,
+        hide_index=True, column_config=col_config,
+    )
+
+    # 几何平均行（常驻底部：受筛选/选择影响，不受表格排序影响）
+    # 单独渲染为一行表格 + 相同 column_config，故主表的交互式列排序不会移动它，且列宽严格对齐。
+    if not df_display.empty and speedup_cols:
+        gmean_row = build_gmean_row(df_display, speedup_cols)
+        flat_gmean, _, _ = flatten_comparison_df(gmean_row, speedup_cols)
+        gmean_styled = apply_speedup_styling(
+            flat_gmean, improve_t, regress_t, flat_speedup
+        )
+        st.dataframe(
+            gmean_styled, width="stretch",
+            hide_index=True, column_config=col_config,
+        )
 
     # 导出按钮
     if not df_display.empty:
