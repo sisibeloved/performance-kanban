@@ -11,6 +11,7 @@ import sys
 import io
 import os
 import json
+import base64
 import statistics
 from dataclasses import dataclass, field
 from math import exp, log
@@ -19,6 +20,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # =============================================================================
 # Data Layer — 纯函数，无 Streamlit 依赖
@@ -160,20 +162,11 @@ def build_comparison_df(
 ) -> tuple[pd.DataFrame, list[tuple]]:
     """
     构建对比表格 DataFrame（MultiIndex 二级表头）。
-    baseline 两列：绝对值 | 单位
     每个 candidate 三列：绝对值 | 单位 | Speedup
     返回 (DataFrame, speedup列名元组列表)
     """
     # 构建 MultiIndex 列
-    base_label = baseline.name or "baseline"
-    # 避免 baseline 列名与某个 candidate 同名（否则产生重复列）
-    if base_label in {c.name for c in candidates}:
-        base_label = f"{base_label} (baseline)"
-    col_tuples: list[tuple] = [
-        ("", "用例名"),
-        (base_label, "值"),
-        (base_label, "单位"),
-    ]
+    col_tuples: list[tuple] = [("", "用例名")]
     for cand in candidates:
         col_tuples.append((cand.name, "值"))
         col_tuples.append((cand.name, "单位"))
@@ -188,9 +181,8 @@ def build_comparison_df(
         if base_result is None:
             continue
         base_mean = base_result.mean
-        base_val, base_unit = _format_time(base_mean)
 
-        row = [name, base_val, base_unit]
+        row = [name]
         for cand in candidates:
             cand_result = cand.benchmarks.get(name)
             if cand_result is None:
@@ -379,46 +371,6 @@ def apply_speedup_styling(
     return styler
 
 
-def flatten_comparison_df(
-    df: pd.DataFrame, speedup_cols: list[tuple]
-) -> tuple[pd.DataFrame, list[str], dict[str, int]]:
-    """
-    将 MultiIndex 对比表拍平为单层列名，便于 st.dataframe 用固定像素列宽对齐。
-    返回 (flat_df, flat_speedup_cols, widths)。widths 为 {列名: 像素宽}。
-    """
-    speedup_set = set(speedup_cols)
-    new_cols: list[str] = []
-    flat_speedup: list[str] = []
-    widths: dict[str, int] = {}
-
-    for col in df.columns:
-        if isinstance(col, tuple):
-            top, sub = col
-            if sub == "用例名":
-                label, width = "用例名", 200
-            elif sub == "值":
-                label, width = (f"{top} 值" if top else "值"), 100
-            elif sub == "单位":
-                label, width = (f"{top} 单位" if top else "单位"), 60
-            elif sub == "Speedup":
-                label, width = f"{top} Speedup", 110
-            elif sub == "趋势":
-                label, width = "趋势", 90
-            else:
-                label, width = (f"{top} {sub}".strip() or sub), 100
-        else:
-            label, width = str(col), 100
-
-        if col in speedup_set:
-            flat_speedup.append(label)
-        new_cols.append(label)
-        widths[label] = width
-
-    flat = df.copy()
-    flat.columns = new_cols
-    return flat, flat_speedup, widths
-
-
 # =============================================================================
 # Export Layer — 导出为 Markdown / 图片
 # =============================================================================
@@ -494,6 +446,142 @@ def _sort_df_for_export(
     )
 
 
+def _js_literal(value: str) -> str:
+    """Serialize a value for a <script> block without allowing script close tags."""
+    return json.dumps(value).replace("</", "<\\/")
+
+
+def _build_markdown_clipboard_button_html(markdown_text: str) -> str:
+    """Build a browser-side button that copies Markdown text to the clipboard."""
+    markdown_literal = _js_literal(markdown_text)
+    return f"""
+<button id="copy-md" class="clipboard-copy-button">复制 Markdown 到剪贴板</button>
+<span id="copy-md-status" class="clipboard-copy-status"></span>
+<style>
+  .clipboard-copy-button {{
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #111827;
+    cursor: pointer;
+    font: 14px sans-serif;
+    padding: 0.45rem 0.75rem;
+  }}
+  .clipboard-copy-button:hover {{ border-color: #9ca3af; }}
+  .clipboard-copy-status {{
+    color: #4b5563;
+    font: 13px sans-serif;
+    margin-left: 0.5rem;
+  }}
+</style>
+<script>
+(() => {{
+  const markdown = {markdown_literal};
+  const button = document.getElementById("copy-md");
+  const status = document.getElementById("copy-md-status");
+  button.addEventListener("click", async () => {{
+    try {{
+      await navigator.clipboard.writeText(markdown);
+      status.textContent = "已复制";
+    }} catch (error) {{
+      status.textContent = "复制失败";
+    }}
+  }});
+}})();
+</script>
+"""
+
+
+def _build_image_clipboard_button_html(image_bytes: bytes) -> str:
+    """Build a browser-side button that copies the exported image to the clipboard."""
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    image_literal = _js_literal(image_b64)
+    return f"""
+<button id="copy-jpg" class="clipboard-copy-button">复制 JPG 到剪贴板</button>
+<span id="copy-jpg-status" class="clipboard-copy-status"></span>
+<style>
+  .clipboard-copy-button {{
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #111827;
+    cursor: pointer;
+    font: 14px sans-serif;
+    padding: 0.45rem 0.75rem;
+  }}
+  .clipboard-copy-button:hover {{ border-color: #9ca3af; }}
+  .clipboard-copy-status {{
+    color: #4b5563;
+    font: 13px sans-serif;
+    margin-left: 0.5rem;
+  }}
+</style>
+<script>
+(() => {{
+  const imageBase64 = {image_literal};
+  const button = document.getElementById("copy-jpg");
+  const status = document.getElementById("copy-jpg-status");
+
+  function base64ToBlob(base64, mimeType) {{
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    return new Blob([bytes], {{ type: mimeType }});
+  }}
+
+  async function jpegToPngBlob(base64) {{
+    const image = new Image();
+    image.src = "data:image/jpeg;base64," + base64;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    canvas.getContext("2d").drawImage(image, 0, 0);
+    return new Promise((resolve, reject) => {{
+      canvas.toBlob((blob) => {{
+        if (blob) {{
+          resolve(blob);
+        }} else {{
+          reject(new Error("PNG conversion failed"));
+        }}
+      }}, "image/png");
+    }});
+  }}
+
+  async function copyImage() {{
+    const jpegBlob = base64ToBlob(imageBase64, "image/jpeg");
+    if (!window.ClipboardItem) {{
+      throw new Error("ClipboardItem is not supported");
+    }}
+
+    if (!ClipboardItem.supports || ClipboardItem.supports("image/jpeg")) {{
+      try {{
+        await navigator.clipboard.write([
+          new ClipboardItem({{ "image/jpeg": jpegBlob }})
+        ]);
+        return;
+      }} catch (error) {{
+        // Fall back below for browsers that only accept PNG image clipboard data.
+      }}
+    }}
+
+    const pngBlob = await jpegToPngBlob(imageBase64);
+    await navigator.clipboard.write([
+      new ClipboardItem({{ "image/png": pngBlob }})
+    ]);
+  }}
+
+  button.addEventListener("click", async () => {{
+    try {{
+      await copyImage();
+      status.textContent = "已复制";
+    }} catch (error) {{
+      status.textContent = "复制失败";
+    }}
+  }});
+}})();
+</script>
+"""
+
+
 def _geomean_speedup(
     df: pd.DataFrame, speedup_cols: list[tuple]
 ) -> dict[str, float]:
@@ -512,28 +600,6 @@ def _geomean_speedup(
         except (ValueError, ZeroDivisionError):
             pass
     return results
-
-
-def build_gmean_row(
-    df: pd.DataFrame,
-    speedup_cols: list[tuple],
-    name_col: tuple = ("", "用例名"),
-) -> pd.DataFrame:
-    """
-    构建几何平均行（单行 DataFrame，列与对比表一致）。
-    几何平均仅填入 Speedup 列，其余列留空。
-    """
-    gmeans = _geomean_speedup(df, speedup_cols)
-    row: dict = {}
-    for col in df.columns:
-        if col == name_col:
-            row[col] = "几何平均"
-        elif col in speedup_cols:
-            top = col[0]
-            row[col] = round(gmeans[top], 4) if top in gmeans else None
-        else:
-            row[col] = ""
-    return pd.DataFrame([row], columns=df.columns)
 
 
 def export_df_to_markdown(
@@ -759,6 +825,10 @@ def _render_export_buttons(
             file_name=f"{file_prefix}.md",
             mime="text/markdown",
         )
+        components.html(
+            _build_markdown_clipboard_button_html(md_text),
+            height=44,
+        )
 
     with col_jpg:
         try:
@@ -776,6 +846,10 @@ def _render_export_buttons(
                 data=img_bytes,
                 file_name=f"{file_prefix}.jpg",
                 mime="image/jpeg",
+            )
+            components.html(
+                _build_image_clipboard_button_html(img_bytes),
+                height=44,
             )
         except Exception as e:
             st.warning(f"JPG 导出失败（需要 matplotlib）: {e}")
@@ -959,46 +1033,9 @@ def render_tab_comparison(config: dict):
     col2.metric("候选数", len(candidates))
     col3.metric("当前显示", len(df_display))
 
-    # 拍平为单层表头 + 固定像素列宽，使主表与几何平均行严格对齐
-    flat_df, flat_speedup, widths = flatten_comparison_df(df_display, speedup_cols)
-
-    # 用例名 + baseline 值/单位 固定在左侧（横向滚动候选列时常驻可见）
-    base_top = df_display.columns[1][0]  # baseline 列头（拍平前）
-    pinned_orig = {("", "用例名"), (base_top, "值"), (base_top, "单位")}
-    pinned_labels = {
-        flat_label
-        for orig, flat_label in zip(df_display.columns, flat_df.columns)
-        if orig in pinned_orig
-    }
-
-    col_config = {
-        label: st.column_config.Column(
-            width=w,
-            alignment="right" if (label in flat_speedup or label.endswith("值")) else None,
-            pinned=label in pinned_labels,
-        )
-        for label, w in widths.items()
-    }
-
-    # 应用样式（Speedup 颜色编码）
-    styled = apply_speedup_styling(flat_df, improve_t, regress_t, flat_speedup)
-    st.dataframe(
-        styled, width="stretch", height=600,
-        hide_index=True, column_config=col_config,
-    )
-
-    # 几何平均行（常驻底部：受筛选/选择影响，不受表格排序影响）
-    # 单独渲染为一行表格 + 相同 column_config，故主表的交互式列排序不会移动它，且列宽严格对齐。
-    if not df_display.empty and speedup_cols:
-        gmean_row = build_gmean_row(df_display, speedup_cols)
-        flat_gmean, _, _ = flatten_comparison_df(gmean_row, speedup_cols)
-        gmean_styled = apply_speedup_styling(
-            flat_gmean, improve_t, regress_t, flat_speedup
-        )
-        st.dataframe(
-            gmean_styled, width="stretch",
-            hide_index=True, column_config=col_config,
-        )
+    # 应用样式（含列宽）
+    styled = apply_speedup_styling(df_display, improve_t, regress_t, speedup_cols)
+    st.dataframe(styled, width="stretch", height=600)
 
     # 导出按钮
     if not df_display.empty:

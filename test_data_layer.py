@@ -18,8 +18,8 @@ from perf_kanban import (
     export_df_to_markdown,
     export_df_to_image,
     _geomean_speedup,
-    build_gmean_row,
-    flatten_comparison_df,
+    _build_markdown_clipboard_button_html,
+    _build_image_clipboard_button_html,
 )
 
 
@@ -86,15 +86,10 @@ def test_comparison_df():
     assert len(speedup_cols) == 1
     speedup_col = speedup_cols[0]
     assert speedup_col in df.columns
-    # baseline 绝对值列也应展示
-    assert (base.name, "值") in df.columns
-    assert (base.name, "单位") in df.columns
     # 2to3: baseline=0.2, cand=0.1, speedup=2.0
     name_col = ("", "用例名")
     row_2to3 = df[df[name_col] == "2to3"].iloc[0]
     assert abs(row_2to3[speedup_col] - 2.0) < 1e-4
-    # baseline 值非空（0.2s → 200 ms 量级）
-    assert row_2to3[(base.name, "值")] is not None
 
     os.unlink(p1)
     os.unlink(p2)
@@ -256,6 +251,31 @@ def test_export_markdown_sort_parameter_does_not_mutate_table_df():
     print("  [PASS] test_export_markdown_sort_parameter_does_not_mutate_table_df")
 
 
+def test_markdown_clipboard_button_html_uses_safe_text_payload():
+    """测试 Markdown 剪贴板按钮使用安全 JS 文本载荷"""
+    md = 'quote " and </script> marker'
+    button_html = _build_markdown_clipboard_button_html(md)
+
+    assert "复制 Markdown 到剪贴板" in button_html
+    assert "navigator.clipboard.writeText" in button_html
+    assert 'quote \\" and <\\/script> marker' in button_html
+    assert "</script> marker" not in button_html
+    print("  [PASS] test_markdown_clipboard_button_html_uses_safe_text_payload")
+
+
+def test_image_clipboard_button_html_uses_image_clipboard_item():
+    """测试 JPG 剪贴板按钮使用图片 ClipboardItem"""
+    button_html = _build_image_clipboard_button_html(b"\xff\xd8\xffabc")
+
+    assert "复制 JPG 到剪贴板" in button_html
+    assert "navigator.clipboard.write" in button_html
+    assert "ClipboardItem" in button_html
+    assert "image/jpeg" in button_html
+    assert "image/png" in button_html
+    assert "/9j/YWJj" in button_html
+    print("  [PASS] test_image_clipboard_button_html_uses_image_clipboard_item")
+
+
 def test_geomean_speedup():
     """测试 Geomean Speedup 计算"""
     p1 = make_json_file({"a": 1.0, "b": 1.0, "c": 1.0})
@@ -275,73 +295,6 @@ def test_geomean_speedup():
     os.unlink(p1)
     os.unlink(p2)
     print("  [PASS] test_geomean_speedup")
-
-
-def test_gmean_row():
-    """测试几何平均行构建"""
-    p1 = make_json_file({"a": 1.0, "b": 1.0, "c": 1.0})
-    p2 = make_json_file({"a": 0.5, "b": 1.0, "c": 2.0})
-
-    base = load_benchmark(p1)
-    cand = load_benchmark(p2)
-    names = get_all_benchmark_names([base, cand])
-    df, speedup_cols = build_comparison_df(base, [cand], names)
-
-    name_col = ("", "用例名")
-    gmean_row = build_gmean_row(df, speedup_cols)
-
-    # 单行，列与原表一致
-    assert len(gmean_row) == 1
-    assert list(gmean_row.columns) == list(df.columns)
-    # 用例名列标记为“几何平均”
-    assert gmean_row.iloc[0][name_col] == "几何平均"
-    # Speedup 列为几何平均值 (2.0 * 1.0 * 0.5)^(1/3) = 1.0
-    assert abs(gmean_row.iloc[0][speedup_cols[0]] - 1.0) < 1e-6
-
-    # 受筛选影响：仅取 a 行 (speedup 2.0) 时几何平均 = 2.0
-    df_sub = df[df[name_col] == "a"]
-    gmean_sub = build_gmean_row(df_sub, speedup_cols)
-    assert abs(gmean_sub.iloc[0][speedup_cols[0]] - 2.0) < 1e-6
-
-    os.unlink(p1)
-    os.unlink(p2)
-    print("  [PASS] test_gmean_row")
-
-
-def test_flatten_comparison_df():
-    """测试 MultiIndex 拍平为单层表头 + 列宽"""
-    p1 = make_json_file({"a": 1.0, "b": 1.0})
-    p2 = make_json_file({"a": 0.5, "b": 2.0})
-
-    base = load_benchmark(p1)
-    cand = load_benchmark(p2)
-    names = get_all_benchmark_names([base, cand])
-    df, speedup_cols = build_comparison_df(base, [cand], names)
-
-    flat, flat_speedup, widths = flatten_comparison_df(df, speedup_cols)
-
-    # 列名全部为单层字符串
-    assert all(isinstance(c, str) for c in flat.columns)
-    assert "用例名" in flat.columns
-    # Speedup 列名带 candidate 前缀，且记录在 flat_speedup 中
-    cand_name = cand.name
-    assert f"{cand_name} Speedup" in flat.columns
-    assert flat_speedup == [f"{cand_name} Speedup"]
-    # 每个列都有像素宽
-    assert set(widths.keys()) == set(flat.columns)
-    assert all(isinstance(w, int) and w > 0 for w in widths.values())
-    # 行数不变，数据保持
-    assert len(flat) == len(df)
-
-    # 几何平均行拍平后列结构一致（确保主表与底部行严格对齐）
-    gmean = build_gmean_row(df, speedup_cols)
-    flat_g, _, widths_g = flatten_comparison_df(gmean, speedup_cols)
-    assert list(flat_g.columns) == list(flat.columns)
-    assert widths_g == widths
-
-    os.unlink(p1)
-    os.unlink(p2)
-    print("  [PASS] test_flatten_comparison_df")
 
 
 def test_export_image():
@@ -378,8 +331,8 @@ if __name__ == "__main__":
     test_export_markdown_comparison()
     test_export_markdown_trend()
     test_export_markdown_sort_parameter_does_not_mutate_table_df()
+    test_markdown_clipboard_button_html_uses_safe_text_payload()
+    test_image_clipboard_button_html_uses_image_clipboard_item()
     test_geomean_speedup()
-    test_gmean_row()
-    test_flatten_comparison_df()
     test_export_image()
     print("\nAll tests passed!")
