@@ -360,25 +360,7 @@ def apply_speedup_styling(
         ]
     )
 
-    # 列宽：用例名宽，值/单位窄，Speedup 适中
-    col_widths = {}
-    for col in df.columns:
-        if isinstance(col, tuple):
-            top, sub = col
-            if sub == "用例名":
-                col_widths[col] = 160
-            elif sub == "值":
-                col_widths[col] = 90
-            elif sub == "单位":
-                col_widths[col] = 50
-            elif sub == "Speedup":
-                col_widths[col] = 100
-            elif sub == "趋势":
-                col_widths[col] = 80
-        else:
-            col_widths[col] = 100
-
-    # 设置列宽（px）
+    # 数值列右对齐
     styler = styler.set_properties(
         **{"text-align": "right"},
         subset=[c for c in df.columns if isinstance(c, tuple) and c[1] in ("值", "Speedup")]
@@ -387,36 +369,159 @@ def apply_speedup_styling(
     return styler
 
 
-def _comparison_column_config(
-    df: pd.DataFrame, speedup_cols: list[tuple]
-) -> dict[int, dict]:
-    """Column config for comparison tables, preserving MultiIndex headers."""
-    config: dict[int, dict] = {}
-    for idx, col in enumerate(df.columns):
-        width = 100
-        alignment = None
-        if isinstance(col, tuple):
-            _, sub = col
-            if sub == "用例名":
-                width = 200
-            elif sub == "值":
-                width = 100
-                alignment = "right"
-            elif sub == "单位":
-                width = 60
-            elif sub == "Speedup":
-                width = 110
-                alignment = "right"
-            elif sub == "趋势":
-                width = 90
+def build_gmean_row(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    name_col: tuple = ("", "用例名"),
+) -> pd.DataFrame:
+    """
+    构建几何平均行（单行 DataFrame，列与对比表一致）。
+    几何平均仅填入 Speedup 列，其余列留空。
+    """
+    gmeans = _geomean_speedup(df, speedup_cols)
+    row: dict = {}
+    for col in df.columns:
+        if col == name_col:
+            row[col] = "几何平均"
+        elif col in speedup_cols:
+            top = col[0]
+            row[col] = round(gmeans[top], 4) if top in gmeans else None
+        else:
+            row[col] = ""
+    return pd.DataFrame([row], columns=df.columns)
 
-        config[idx] = st.column_config.Column(
-            width=width,
-            alignment=alignment,
-            pinned=idx < 3,
-        )
 
-    return config
+# 对比表 HTML 渲染所用的列宽（像素）
+_COMPARISON_COL_WIDTHS = {
+    "用例名": 200,
+    "值": 92,
+    "单位": 46,
+    "Speedup": 104,
+    "趋势": 90,
+}
+# 固定在左侧的列数：用例名 + baseline 值/单位
+_COMPARISON_PINNED = 3
+
+
+def _col_width(col: tuple | str) -> int:
+    sub = col[1] if isinstance(col, tuple) else col
+    return _COMPARISON_COL_WIDTHS.get(sub, 100)
+
+
+def render_comparison_table_html(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    improve_thresh: float,
+    regress_thresh: float,
+    append_gmean: bool = True,
+) -> str:
+    """
+    将对比表渲染为 HTML 字符串。相比 st.dataframe(glide canvas)，HTML 表格能：
+    - 完整渲染二级表头（含被固定的 baseline，借助 colspan）
+    - 用 CSS position:sticky 固定左侧列，且保留两级表头
+    - 精确控制列宽、让一级表头居中
+    - 在最底部常驻几何平均行（HTML 表格无交互排序，行序恒定）
+    """
+    if append_gmean and not df.empty and speedup_cols:
+        df = pd.concat([df, build_gmean_row(df, speedup_cols)], ignore_index=True)
+
+    cols = list(df.columns)
+    widths = [_col_width(c) for c in cols]
+    offsets = []
+    acc = 0
+    for w in widths:
+        offsets.append(acc)
+        acc += w
+    total_w = acc
+
+    styler = df.style.hide(axis="index")
+
+    # Speedup 颜色编码
+    def _color_speedup(col):
+        if col.name in speedup_cols:
+            return [
+                style_speedup_cell(v, improve_thresh, regress_thresh) for v in col
+            ]
+        return ["" for _ in col]
+
+    styler = styler.apply(_color_speedup)
+    # Speedup 数值统一精度；缺失显示 —
+    styler = styler.format(
+        {c: "{:.3f}" for c in speedup_cols}, na_rep="—"
+    )
+
+    table_styles: list[dict] = [
+        {"selector": "", "props": [
+            ("border-collapse", "collapse"),
+            ("table-layout", "fixed"),
+            ("width", f"{total_w}px"),
+            ("font-size", "13px"),
+            ("color", "#1a1a1a"),
+        ]},
+        {"selector": ".col_heading.level0", "props": [
+            ("text-align", "center"),
+            ("background-color", "#e6e9f0"),
+            ("border", "1px solid #cfd4dc"),
+            ("padding", "5px 6px"),
+        ]},
+        {"selector": ".col_heading.level1", "props": [
+            ("text-align", "center"),
+            ("background-color", "#f0f2f6"),
+            ("border", "1px solid #cfd4dc"),
+            ("padding", "5px 6px"),
+        ]},
+        {"selector": "thead th", "props": [
+            ("position", "sticky"),
+            ("top", "0"),
+            ("z-index", "2"),
+        ]},
+        {"selector": "tbody td", "props": [
+            ("border", "1px solid #e6e6e6"),
+            ("padding", "3px 6px"),
+            ("background-color", "#ffffff"),
+            ("white-space", "nowrap"),
+            ("overflow", "hidden"),
+            ("text-overflow", "ellipsis"),
+        ]},
+        {"selector": "tbody tr:last-child td", "props": [
+            ("font-weight", "bold"),
+            ("border-top", "2px solid #9aa0a6"),
+            ("background-color", "#fafbfc"),
+        ]},
+    ]
+
+    for i, (col, w, off) in enumerate(zip(cols, widths, offsets)):
+        sub = col[1] if isinstance(col, tuple) else col
+        table_styles.append({"selector": f".col{i}", "props": [
+            ("width", f"{w}px"),
+            ("min-width", f"{w}px"),
+            ("max-width", f"{w}px"),
+        ]})
+        if sub in ("值", "Speedup"):
+            table_styles.append({"selector": f"tbody td.col{i}", "props": [
+                ("text-align", "right"),
+            ]})
+        if i < _COMPARISON_PINNED:
+            table_styles.append({"selector": f"tbody .col{i}", "props": [
+                ("position", "sticky"),
+                ("left", f"{off}px"),
+                ("z-index", "1"),
+            ]})
+            table_styles.append({"selector": f"thead .col{i}", "props": [
+                ("position", "sticky"),
+                ("left", f"{off}px"),
+                ("top", "0"),
+                ("z-index", "3"),
+            ]})
+
+    styler = styler.set_table_styles(table_styles)
+
+    return (
+        '<div style="overflow:auto; max-height:600px; '
+        'border:1px solid #cfd4dc; border-radius:4px;">'
+        f"{styler.to_html()}"
+        "</div>"
+    )
 
 
 # =============================================================================
@@ -1013,14 +1118,11 @@ def render_tab_comparison(config: dict):
     col2.metric("候选数", len(candidates))
     col3.metric("当前显示", len(df_display))
 
-    # 应用样式（含列宽）
-    styled = apply_speedup_styling(df_display, improve_t, regress_t, speedup_cols)
-    st.dataframe(
-        styled,
-        width="stretch",
-        height=600,
-        hide_index=True,
-        column_config=_comparison_column_config(df_display, speedup_cols),
+    # HTML 表格渲染：二级表头 + 固定列(用例名/baseline) + 一级表头居中 + 底部几何平均行
+    st.html(
+        render_comparison_table_html(
+            df_display, speedup_cols, improve_t, regress_t
+        )
     )
 
     # 导出按钮

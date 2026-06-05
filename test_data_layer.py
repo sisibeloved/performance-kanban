@@ -20,7 +20,8 @@ from perf_kanban import (
     export_df_to_image,
     apply_speedup_styling,
     _geomean_speedup,
-    _comparison_column_config,
+    build_gmean_row,
+    render_comparison_table_html,
     _build_export_buttons_iframe_html,
 )
 
@@ -283,54 +284,76 @@ def test_export_markdown_sort_parameter_does_not_mutate_table_df():
     print("  [PASS] test_export_markdown_sort_parameter_does_not_mutate_table_df")
 
 
-def test_comparison_column_config_pins_name_and_baseline_columns():
-    """测试对比表用位置固定用例名和 baseline 列，保留 MultiIndex 列名"""
-    p1 = make_json_file({"a": 1.0})
-    p2 = make_json_file({"a": 0.5})
+def test_build_gmean_row():
+    """测试几何平均行：受筛选影响、只在 Speedup 列有值、其余留空"""
+    p1 = make_json_file({"a": 1.0, "b": 1.0, "c": 1.0})
+    p2 = make_json_file({"a": 0.5, "b": 1.0, "c": 2.0}, {"python_version": "3.13.0"})
 
     base = load_benchmark(p1)
     cand = load_benchmark(p2)
-    df, speedup_cols = build_comparison_df(base, [cand], ["a"])
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
 
-    config = _comparison_column_config(df, speedup_cols)
+    name_col = ("", "用例名")
+    row = build_gmean_row(df, speedup_cols)
+    assert len(row) == 1
+    assert list(row.columns) == list(df.columns)
+    assert row.iloc[0][name_col] == "几何平均"
+    # speedups: a=2.0, b=1.0, c=0.5 → geomean = 1.0
+    assert abs(row.iloc[0][speedup_cols[0]] - 1.0) < 1e-6
+    # baseline 值/单位 列留空
+    base_val_col = (base.name, "值")
+    assert row.iloc[0][base_val_col] == ""
 
-    assert all(getattr(col, "__class__", None) is tuple for col in df.columns)
-    assert config[0]["pinned"] is True
-    assert config[1]["pinned"] is True
-    assert config[2]["pinned"] is True
-    assert config[1]["alignment"] == "right"
-    assert config[3]["pinned"] is False
+    # 受筛选影响：仅取 a 行 (speedup 2.0)
+    df_sub = df[df[name_col] == "a"]
+    assert abs(build_gmean_row(df_sub, speedup_cols).iloc[0][speedup_cols[0]] - 2.0) < 1e-6
 
     os.unlink(p1)
     os.unlink(p2)
-    print("  [PASS] test_comparison_column_config_pins_name_and_baseline_columns")
+    print("  [PASS] test_build_gmean_row")
 
 
-def test_speedup_styling_centers_top_level_column_headers():
-    """测试一级列头居中显示"""
-    p1 = make_json_file({"a": 1.0})
-    p2 = make_json_file({"a": 0.5})
+def test_comparison_table_html_structure():
+    """
+    测试对比表 HTML 渲染的真实输出结构。
+    这是渲染层断言：不同于此前只检查 Styler 对象是否“含有”某段 CSS
+    （st.dataframe 会忽略它，导致测试绿但界面错），这里直接断言
+    最终 HTML 字符串里的二级表头、居中、固定列、几何平均行确实存在。
+    """
+    p1 = make_json_file({"a": 1.0, "b": 1.0}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"a": 0.5, "b": 2.0}, {"python_version": "3.13.0"})
 
     base = load_benchmark(p1)
     cand = load_benchmark(p2)
-    df, speedup_cols = build_comparison_df(base, [cand], ["a"])
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
 
-    styled = apply_speedup_styling(df, 1.05, 0.95, speedup_cols)
-    styled._compute()
-    styles = styled._translate(False, False)
+    html = render_comparison_table_html(df, speedup_cols, 1.05, 0.95)
 
-    top_level_header_styles = [
-        style
-        for style in styles["table_styles"]
-        if style["selector"] == ".col_heading.level0"
-    ]
-    assert top_level_header_styles == [
-        {"selector": ".col_heading.level0", "props": [("text-align", "center")]}
-    ]
+    # 1) baseline 表头是二级：用 colspan 跨“值/单位”两列，且带 baseline 名称
+    assert 'colspan="2"' in html
+    assert base.name in html
+    # 候选三列分组
+    assert 'colspan="3"' in html
+    # 两级表头都存在
+    assert "col_heading level0" in html and "col_heading level1" in html
+
+    # 2) 一级表头居中（在最终 HTML 的 <style> 中真实生效，因为这是 HTML 渲染）
+    assert "text-align: center" in html
+
+    # 3) 固定列：用例名 + baseline 值/单位（前 3 列）用 sticky 定位
+    assert "position: sticky" in html
+    assert html.count("left: 0px") >= 1  # 第一列贴左
+
+    # 4) 几何平均行常驻底部
+    assert "几何平均" in html
+    # 最底行加粗
+    assert "tbody tr:last-child td" in html
 
     os.unlink(p1)
     os.unlink(p2)
-    print("  [PASS] test_speedup_styling_centers_top_level_column_headers")
+    print("  [PASS] test_comparison_table_html_structure")
 
 
 def test_export_buttons_iframe_html_renders_three_uniform_actions():
@@ -444,8 +467,8 @@ if __name__ == "__main__":
     test_export_markdown_comparison()
     test_export_markdown_trend()
     test_export_markdown_sort_parameter_does_not_mutate_table_df()
-    test_comparison_column_config_pins_name_and_baseline_columns()
-    test_speedup_styling_centers_top_level_column_headers()
+    test_build_gmean_row()
+    test_comparison_table_html_structure()
     test_export_buttons_iframe_html_renders_three_uniform_actions()
     test_render_export_buttons_uses_iframe_for_button_group()
     test_geomean_speedup()
