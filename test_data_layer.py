@@ -351,6 +351,13 @@ def test_comparison_table_html_structure():
     # 最底行加粗
     assert "tbody tr:last-child td" in html
 
+    # 5) 占满屏幕(issue #2):表格 width:100% + colgroup 精确控制列宽
+    #    固定列给死像素宽(sticky 偏移正确),非固定列留空由浏览器平分撑满
+    assert "width: 100%" in html
+    assert "<colgroup>" in html
+    assert "width:200px" in html      # 用例名固定列
+    assert "<col/>" in html           # 非固定列无宽度,平分剩余空间撑满
+
     os.unlink(p1)
     os.unlink(p2)
     print("  [PASS] test_comparison_table_html_structure")
@@ -456,6 +463,37 @@ def test_export_image():
     print("  [PASS] test_export_image")
 
 
+def test_export_image_long_names_do_not_crash():
+    """
+    issue #3:候选名/用例名很长时,JPG 导出不应让文字戳出单元格。
+    这里断言超长名称下导出仍产出有效 JPG(列宽按内容分配 + 截断,不再等宽溢出)。
+    """
+    p1 = make_json_file(
+        {"async_tree_cpu_io_mixed_with_a_very_long_name": 0.2, "2to3": 0.1},
+        {"python_version": "3.12.0"},
+    )
+    p2 = make_json_file(
+        {"async_tree_cpu_io_mixed_with_a_very_long_name": 0.1, "2to3": 0.2},
+        {"python_version": "3.13.0"},
+    )
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    # 模拟超长候选名(issue 截图里的情形)
+    cand.name = "ebf953ARM_cinderx_1C_0602_06_very_long_label"
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+
+    img_bytes = export_df_to_image(df, speedup_cols, 1.05, 0.95, baseline_label=base.name)
+    assert isinstance(img_bytes, bytes)
+    assert img_bytes[:3] == b"\xff\xd8\xff"
+    assert len(img_bytes) > 1000
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_export_image_long_names_do_not_crash")
+
+
 if __name__ == "__main__":
     print("Running Data Layer tests...")
     test_load_benchmark()
@@ -473,4 +511,5 @@ if __name__ == "__main__":
     test_render_export_buttons_uses_iframe_for_button_group()
     test_geomean_speedup()
     test_export_image()
+    test_export_image_long_names_do_not_crash()
     print("\nAll tests passed!")

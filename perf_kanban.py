@@ -454,7 +454,9 @@ def render_comparison_table_html(
         {"selector": "", "props": [
             ("border-collapse", "collapse"),
             ("table-layout", "fixed"),
-            ("width", f"{total_w}px"),
+            # 占满容器：窄于屏幕时拉伸填满，宽于屏幕时退化为最小宽度并横向滚动
+            ("width", "100%"),
+            ("min-width", f"{total_w}px"),
             ("font-size", "13px"),
             ("color", "#1a1a1a"),
         ]},
@@ -490,17 +492,13 @@ def render_comparison_table_html(
         ]},
     ]
 
-    for i, (col, w, off) in enumerate(zip(cols, widths, offsets)):
+    for i, (col, off) in enumerate(zip(cols, offsets)):
         sub = col[1] if isinstance(col, tuple) else col
-        table_styles.append({"selector": f".col{i}", "props": [
-            ("width", f"{w}px"),
-            ("min-width", f"{w}px"),
-            ("max-width", f"{w}px"),
-        ]})
         if sub in ("值", "Speedup"):
             table_styles.append({"selector": f"tbody td.col{i}", "props": [
                 ("text-align", "right"),
             ]})
+        # 固定列：用例名 + baseline 值/单位 用 sticky 钉在左侧
         if i < _COMPARISON_PINNED:
             table_styles.append({"selector": f"tbody .col{i}", "props": [
                 ("position", "sticky"),
@@ -516,10 +514,22 @@ def render_comparison_table_html(
 
     styler = styler.set_table_styles(table_styles)
 
+    # 用 <colgroup> 精确设定列宽（table-layout:fixed 下权威，且不受二级表头
+    # colspan 影响）。固定列给死像素宽以保证 sticky 偏移正确；非固定列留空，
+    # 由浏览器平分剩余宽度，使表格撑满容器。
+    col_tags = "".join(
+        f'<col style="width:{w}px"/>' if i < _COMPARISON_PINNED else "<col/>"
+        for i, w in enumerate(widths)
+    )
+    colgroup = f"<colgroup>{col_tags}</colgroup>"
+    html = styler.to_html()
+    tag_end = html.find(">", html.find("<table")) + 1
+    html = html[:tag_end] + colgroup + html[tag_end:]
+
     return (
         '<div style="overflow:auto; max-height:600px; '
         'border:1px solid #cfd4dc; border-radius:4px;">'
-        f"{styler.to_html()}"
+        f"{html}"
         "</div>"
     )
 
@@ -858,8 +868,24 @@ def export_df_to_image(
 
     total_rows = len(all_text)
 
-    # Figure sizing
-    fig_w = max(8, n_cols * 1.6)
+    # 截断过长文本，避免单列被撑得过宽；保证文字不溢出单元格
+    max_chars = 28
+    for r in range(total_rows):
+        for c in range(n_cols):
+            s = str(all_text[r][c])
+            if len(s) > max_chars:
+                all_text[r][c] = s[: max_chars - 1] + "…"
+
+    # 按各列最长内容（含边距）分配列宽，列宽与字符数成正比，从根本上防止文字戳出
+    col_chars = [
+        max(len(str(all_text[r][c])) for r in range(total_rows)) + 2
+        for c in range(n_cols)
+    ]
+    total_chars = sum(col_chars) or 1
+    col_widths = [c / total_chars for c in col_chars]
+
+    # 图宽随内容总量伸缩，确保每列有足够绝对宽度容纳文字
+    fig_w = max(8, total_chars * 0.13)
     fig_h = max(3, total_rows * 0.42 + 0.8)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.axis("off")
@@ -870,6 +896,7 @@ def export_df_to_image(
     table = ax.table(
         cellText=all_text,
         cellColours=all_colors,
+        colWidths=col_widths,
         cellLoc="center",
         loc="center",
     )
