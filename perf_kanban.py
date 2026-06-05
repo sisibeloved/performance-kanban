@@ -1176,9 +1176,20 @@ def render_sidebar() -> dict:
 
         # 文件多选
         file_options = {os.path.basename(p): p for p in json_files}
+        # 预选钩子：便于一键演示 / 冒烟测试直接渲染对比页。
+        #   PERFKANBAN_PRESELECT=all        → 选中全部文件
+        #   PERFKANBAN_PRESELECT=a.json,b   → 选中指定文件
+        _preselect = os.environ.get("PERFKANBAN_PRESELECT", "")
+        if _preselect == "all":
+            _default = list(file_options.keys())
+        elif _preselect:
+            _default = [f for f in _preselect.split(",") if f in file_options]
+        else:
+            _default = []
         selected_files = st.multiselect(
             "选择文件",
             options=list(file_options.keys()),
+            default=_default,
         )
 
         if len(selected_files) < 2:

@@ -92,6 +92,20 @@ PID=$(ss -ltnp | grep ':8501' | grep -oP 'pid=\K[0-9]+' | head -1); kill "$PID"
   **最终 HTML 字符串**里确实有 `colspan="2"`(二级表头)、`text-align: center`、
   `position: sticky`、几何平均行等。参考 `test_comparison_table_html_structure`。
 
+### 前端控制台冒烟测试 `smoke_test.py`(必跑)
+
+单元测试覆盖不到**前端渲染期**的 JS/Vega 报错(issue #4 的 Vega 元组字段名错就是这样
+漏到线上的——本地只看了排序、没看 Console)。`smoke_test.py` 启动应用 + 无头浏览器,
+渲染对比页后断言**浏览器控制台零报错**:
+
+```bash
+CHROME=/path/to/chrome python smoke_test.py     # 退出码 0=干净, 1=有报错
+```
+
+- 用环境变量 `PERFKANBAN_PRESELECT=all` 让侧栏自动选中文件、直达对比页(也可用于演示)。
+- 找不到 Chrome 或缺 `requests`/`websockets` 时**跳过**(退出码 0),不阻塞无浏览器的 CI。
+- **改动任何前端/图表/表格渲染后都应跑一遍**;已验证它能抓到 #4 那类元组字段名错误。
+
 ---
 
 ## 4. 数据/渲染分层小约定
