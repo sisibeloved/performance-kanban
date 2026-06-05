@@ -21,7 +21,6 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 # =============================================================================
 # Data Layer — 纯函数，无 Streamlit 依赖
@@ -1365,11 +1364,12 @@ def render_tab_comparison(config: dict):
         )
     )
 
-    # JS 桥：隐藏 iframe。用"事件委托"在父文档上挂一个常驻监听(只挂一次)，
-    # 凡点到带 data-sortidx 的表头锚点，就转发到对应隐藏按钮 → 常规重跑。
-    # 委托而非逐元素绑定：st.html 每次重跑会替换表头 DOM，逐元素绑定只对首批节点有效
-    # (导致"只有第一次点击生效")；委托挂在常驻的 document 上，对后续新节点同样生效。
-    components.html(
+    # JS 桥：隐藏 iframe（用 st.iframe 而非已弃用的 st.components.v1.html）。
+    # 用"事件委托"在父文档上挂一个常驻监听(只挂一次)，凡点到带 data-sortidx 的
+    # 表头锚点，就转发到对应隐藏按钮 → 常规重跑。委托而非逐元素绑定：st.html 每次
+    # 重跑会替换表头 DOM，逐元素绑定只对首批节点有效(导致"只有第一次点击生效")；
+    # 委托挂在常驻的 document 上，对后续新节点同样生效。
+    st.iframe(
         """
         <script>
         const pdoc = window.parent.document;
@@ -1386,7 +1386,7 @@ def render_tab_comparison(config: dict):
         }
         </script>
         """,
-        height=0,
+        height=1,  # st.iframe 要求正整数；1px 实际不可见（仅承载桥接脚本）
     )
 
     # 导出按钮（沿用同一排序结果，故导出顺序与表格一致）
