@@ -162,11 +162,19 @@ def build_comparison_df(
 ) -> tuple[pd.DataFrame, list[tuple]]:
     """
     构建对比表格 DataFrame（MultiIndex 二级表头）。
+    baseline 两列：绝对值 | 单位
     每个 candidate 三列：绝对值 | 单位 | Speedup
     返回 (DataFrame, speedup列名元组列表)
     """
     # 构建 MultiIndex 列
-    col_tuples: list[tuple] = [("", "用例名")]
+    base_label = baseline.name or "baseline"
+    if base_label in {c.name for c in candidates}:
+        base_label = f"{base_label} (baseline)"
+    col_tuples: list[tuple] = [
+        ("", "用例名"),
+        (base_label, "值"),
+        (base_label, "单位"),
+    ]
     for cand in candidates:
         col_tuples.append((cand.name, "值"))
         col_tuples.append((cand.name, "单位"))
@@ -181,8 +189,9 @@ def build_comparison_df(
         if base_result is None:
             continue
         base_mean = base_result.mean
+        base_val, base_unit = _format_time(base_mean)
 
-        row = [name]
+        row = [name, base_val, base_unit]
         for cand in candidates:
             cand_result = cand.benchmarks.get(name)
             if cand_result is None:
@@ -369,6 +378,38 @@ def apply_speedup_styling(
     )
 
     return styler
+
+
+def _comparison_column_config(
+    df: pd.DataFrame, speedup_cols: list[tuple]
+) -> dict[int, dict]:
+    """Column config for comparison tables, preserving MultiIndex headers."""
+    config: dict[int, dict] = {}
+    for idx, col in enumerate(df.columns):
+        width = 100
+        alignment = None
+        if isinstance(col, tuple):
+            _, sub = col
+            if sub == "用例名":
+                width = 200
+            elif sub == "值":
+                width = 100
+                alignment = "right"
+            elif sub == "单位":
+                width = 60
+            elif sub == "Speedup":
+                width = 110
+                alignment = "right"
+            elif sub == "趋势":
+                width = 90
+
+        config[idx] = st.column_config.Column(
+            width=width,
+            alignment=alignment,
+            pinned=idx < 3,
+        )
+
+    return config
 
 
 # =============================================================================
@@ -1035,7 +1076,13 @@ def render_tab_comparison(config: dict):
 
     # 应用样式（含列宽）
     styled = apply_speedup_styling(df_display, improve_t, regress_t, speedup_cols)
-    st.dataframe(styled, width="stretch", height=600)
+    st.dataframe(
+        styled,
+        width="stretch",
+        height=600,
+        hide_index=True,
+        column_config=_comparison_column_config(df_display, speedup_cols),
+    )
 
     # 导出按钮
     if not df_display.empty:

@@ -18,6 +18,7 @@ from perf_kanban import (
     export_df_to_markdown,
     export_df_to_image,
     _geomean_speedup,
+    _comparison_column_config,
     _build_markdown_clipboard_button_html,
     _build_image_clipboard_button_html,
 )
@@ -86,10 +87,15 @@ def test_comparison_df():
     assert len(speedup_cols) == 1
     speedup_col = speedup_cols[0]
     assert speedup_col in df.columns
+    # baseline 绝对值列也应展示，并固定在候选列左侧
+    assert (base.name, "值") in df.columns
+    assert (base.name, "单位") in df.columns
+    assert list(df.columns[:3]) == [("", "用例名"), (base.name, "值"), (base.name, "单位")]
     # 2to3: baseline=0.2, cand=0.1, speedup=2.0
     name_col = ("", "用例名")
     row_2to3 = df[df[name_col] == "2to3"].iloc[0]
     assert abs(row_2to3[speedup_col] - 2.0) < 1e-4
+    assert row_2to3[(base.name, "值")] is not None
 
     os.unlink(p1)
     os.unlink(p2)
@@ -251,6 +257,29 @@ def test_export_markdown_sort_parameter_does_not_mutate_table_df():
     print("  [PASS] test_export_markdown_sort_parameter_does_not_mutate_table_df")
 
 
+def test_comparison_column_config_pins_name_and_baseline_columns():
+    """测试对比表用位置固定用例名和 baseline 列，保留 MultiIndex 列名"""
+    p1 = make_json_file({"a": 1.0})
+    p2 = make_json_file({"a": 0.5})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    df, speedup_cols = build_comparison_df(base, [cand], ["a"])
+
+    config = _comparison_column_config(df, speedup_cols)
+
+    assert all(getattr(col, "__class__", None) is tuple for col in df.columns)
+    assert config[0]["pinned"] is True
+    assert config[1]["pinned"] is True
+    assert config[2]["pinned"] is True
+    assert config[1]["alignment"] == "right"
+    assert config[3]["pinned"] is False
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_comparison_column_config_pins_name_and_baseline_columns")
+
+
 def test_markdown_clipboard_button_html_uses_safe_text_payload():
     """测试 Markdown 剪贴板按钮使用安全 JS 文本载荷"""
     md = 'quote " and </script> marker'
@@ -331,6 +360,7 @@ if __name__ == "__main__":
     test_export_markdown_comparison()
     test_export_markdown_trend()
     test_export_markdown_sort_parameter_does_not_mutate_table_df()
+    test_comparison_column_config_pins_name_and_baseline_columns()
     test_markdown_clipboard_button_html_uses_safe_text_payload()
     test_image_clipboard_button_html_uses_image_clipboard_item()
     test_geomean_speedup()
