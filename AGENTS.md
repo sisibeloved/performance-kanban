@@ -39,20 +39,46 @@
 - 只在"能接受 glide 限制"时才用 `st.dataframe`(如趋势表)。
 - 不要试图用"两个 `st.dataframe` 拼像素对齐"——做不到,别走这条死路。
 
-HTML 表格代价:失去 glide 的交互式排序(本项目已用"导出排序"替代,影响为零)、
-虚拟滚动、全屏;且**不随 Streamlit 深色主题自适应**(目前固定浅色样式)。
+HTML 表格代价:虚拟滚动、全屏丢失;**不随 Streamlit 深色主题自适应**(目前固定浅色样式)。
+交互式排序已**重新实现**为"点击表头"(见第 5 节)。
 
 ---
 
 ## 2. 验证纪律:渲染出来看,别信"看起来合理"
 
 - 改动**任何前端/渲染**后,要么把最终产物渲染出来看,要么断言**最终产物字符串**。
-- 优先直接 `streamlit run perf_kanban.py sample_data/` 在浏览器里看。
-- 如果环境跑不起来 streamlit 服务(沙箱限制、无显示等),退路是把
-  `Styler.to_html()` 写成 HTML 文件,用任意浏览器或 headless 浏览器截图肉眼检查
-  (任何 Chromium/Chrome 的 `--headless --screenshot=out.png file://...html` 都行,
-  具体可执行文件路径自行确定,不要写死)。
-- 验证 `position:sticky` 这类滚动行为时,在页面里用脚本设置容器 `scrollLeft` 后再截图。
+- **静态片段**(`Styler.to_html()`):写成 HTML 文件,用 headless 浏览器截图肉眼看
+  (任意 Chromium/Chrome 的 `--headless --screenshot=out.png file://...html`;
+  可执行路径自行确定,不要写死)。验证 `position:sticky` 时先用脚本设容器
+  `scrollLeft`/`scrollTop` 再截图。
+- **整个 Streamlit 应用 / 交互行为**:可以(也应该)真跑起来验证,环境是支持的。
+
+### ⚠️ pkill 自杀陷阱(踩过)
+
+`pkill -f streamlit` 会**把正在执行该命令的 shell 自己杀掉**——因为这个 shell 的命令行
+里就含 "streamlit" 字样,自匹配 → SIGTERM → 整条命令 exit 144。曾被这个误导成
+"沙箱不让跑 streamlit",其实环境一直能跑。**别用 `pkill -f <在你命令里出现的词>`**;
+要停服务就**按端口杀**:
+```bash
+PID=$(ss -ltnp | grep ':8501' | grep -oP 'pid=\K[0-9]+' | head -1); kill "$PID"
+```
+
+### 跑起来验证的正确姿势
+
+1. 首次需跳过 streamlit 的邮箱交互提示:`mkdir -p ~/.streamlit &&
+   printf '[general]\nemail = ""\n' > ~/.streamlit/credentials.toml`。
+2. 后台启动(用 harness 的 run_in_background;`fileWatcherType none` 改代码后需手动重启):
+   `python -m streamlit run perf_kanban.py sample_data/ --server.headless true
+   --server.port 8501 --server.address 127.0.0.1 --browser.gatherUsageStats false
+   --server.fileWatcherType none`,然后 `curl -s -o /dev/null -w "%{http_code}" :8501`
+   等 200。
+3. 默认侧栏未选文件 → 表格不渲染。验证表格相关交互时,可临时给"选择文件"
+   multiselect 加 `default=...`(验证后**务必还原**),或用 CDP 驱动 multiselect。
+4. **交互验证(浏览器扩展未连时)**:用 headless Chrome + CDP,仅需 `requests`+`websockets`:
+   `chrome --headless=new --remote-debugging-port=9222 ... "http://127.0.0.1:8501/"`,
+   从 `http://127.0.0.1:9222/json` 取 page 的 `webSocketDebuggerUrl`,用 `Runtime.evaluate`
+   读 DOM / `.click()` / 轮询变化。验"无整页刷新"用 sentinel:先 `window.__x='ALIVE'`,
+   点击后再读,若仍在 → 是平滑重跑而非 reload。
 
 ---
 
@@ -76,5 +102,29 @@ HTML 表格代价:失去 glide 的交互式排序(本项目已用"导出排序"�
   若 baseline 名与某 candidate 同名,会自动加 ` (baseline)` 后缀避免重复列。
 - 几何平均行(`build_gmean_row`)**受筛选/选择影响,不受排序影响**,常驻表格最底部;
   只在 Speedup 列有值,其余留空。
-- 导出(Markdown/JPG)用的是筛选后的 `df_display`,**只受筛选影响**;排序通过
-  独立的"导出排序"参数(`_sort_df_for_export`)实现,不依赖界面排序。
+- 排序在**服务端**做(`_sort_df_for_export`,稳定排序),表格/柱状图/导出共用同一
+  `df_sorted`;几何平均在排序后才追加 → 永远置底。可排序列 = 用例名 + 各候选 Speedup
+  (值/单位是带单位的格式化字符串、跨行单位不一,不参与排序)。
+
+---
+
+## 5. 点击表头排序:HTML 表 + JS 桥(平滑,不整页刷新)
+
+HTML 表是静态的,没有原生点击排序。实现方式:
+
+- 表头是带 `data-sortidx` 的锚点(`render_comparison_table_html` 的 `header_links` 注入)。
+- 渲染一批**离屏隐藏的 `st.button`**(key=`cmp_sortbtn_<k>`),点击它们走常规 websocket
+  重跑(**平滑,不整页刷新**)。排序状态存 `st.session_state`。
+- 一个 `height=0` 的 `components.html` iframe 内 JS,用 `window.parent.document` **事件委托**
+  把表头点击转发到对应隐藏按钮。
+
+**关键坑(踩过):** 必须用**事件委托**(在常驻的 `document` 上挂一个监听),不能逐个
+锚点 `addEventListener`。因为每次重跑 `st.html` 会**替换表头 DOM 节点**,逐元素绑定只对
+首批节点有效 → 表现为"**只有第一次点击生效,之后失灵**"。委托挂在不变的 `document` 上
+(用 `document.__cmpSortDelegated` 防重复挂),对后续新节点同样有效。
+
+> ❌ 别用 `<a href="?sort=...">` 查询参数导航来排序——那会**整页刷新**(锚点导航
+> 触发整页重载),体验差。
+
+已用 headless Chrome + CDP 实测:连点两次(含切换升/降序)都生效,`window` sentinel
+跨点击存活 → 确认是平滑重跑而非整页刷新。

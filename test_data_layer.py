@@ -2,6 +2,7 @@
 import json
 import tempfile
 import os
+import re
 
 # 添加当前目录到 path
 import sys
@@ -23,6 +24,9 @@ from perf_kanban import (
     build_gmean_row,
     render_comparison_table_html,
     _build_export_buttons_iframe_html,
+    _flatten_df_for_export,
+    _image_header_layout,
+    _sort_df_for_export,
 )
 
 
@@ -363,6 +367,84 @@ def test_comparison_table_html_structure():
     print("  [PASS] test_comparison_table_html_structure")
 
 
+def test_sort_keeps_gmean_last_and_export_in_sync():
+    """
+    重新实现的排序:数据行按所选列排序,几何平均不参与排序(恒在最底),
+    且导出(Markdown)顺序与表格一致。
+    """
+    p1 = make_json_file({"a": 1.0, "b": 1.0, "c": 1.0}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"a": 0.5, "b": 1.0, "c": 2.0}, {"python_version": "3.13.0"})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+    name_col = ("", "用例名")
+    scol = speedup_cols[0]  # candidate Speedup
+
+    # 按 Speedup 降序：a=2.0, b=1.0, c=0.5
+    df_sorted = _sort_df_for_export(df, scol, False)
+    order = df_sorted[name_col].tolist()
+    assert order == ["a", "b", "c"]
+
+    # 表格:几何平均必须是最后一行（不参与排序）
+    html = render_comparison_table_html(df_sorted, speedup_cols, 1.05, 0.95)
+    data_cells = re.findall(
+        r'<td[^>]*class="data row\d+ col0"[^>]*>([^<]*)</td>', html
+    )
+    assert data_cells[-1] == "几何平均"
+    assert data_cells[:-1] == order  # 数据行顺序 = 排序结果，几何平均额外置底
+
+    # 导出:Markdown 行序与表格一致
+    md = export_df_to_markdown(df_sorted, speedup_cols, 1.05, 0.95, baseline_label=base.name)
+    md_bench = [
+        ln.split("|")[1].strip()
+        for ln in md.splitlines()
+        if ln.startswith("|") and "Benchmark" not in ln and "---" not in ln
+    ]
+    assert md_bench == order
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_sort_keeps_gmean_last_and_export_in_sync")
+
+
+def test_header_links_inject_clickable_sort_anchors():
+    """
+    点击表头排序:render_comparison_table_html 给指定二级表头列注入可点锚点
+    (带 data-sortidx + 当前方向箭头);未指定的列(值/单位)不应有锚点。
+    """
+    p1 = make_json_file({"a": 1.0, "b": 1.0}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"a": 0.5, "b": 2.0}, {"python_version": "3.13.0"})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+
+    # 用例名(col0)→按钮0 当前升序激活; candidate Speedup→按钮1
+    sp_idx = list(df.columns).index(speedup_cols[0])
+    header_links = {0: (0, " ▲"), sp_idx: (1, "")}
+    html = render_comparison_table_html(
+        df, speedup_cols, 1.05, 0.95, header_links=header_links
+    )
+
+    # 用例名表头被包成锚点并带升序箭头 + data-sortidx
+    assert 'data-sortidx="0"' in html
+    assert "用例名 ▲</a>" in html
+    # Speedup 表头被包成锚点
+    assert 'data-sortidx="1"' in html
+    assert "Speedup</a>" in html
+    # 整格可点
+    assert "display:block" in html
+    # 只有这两个可排序列被注入锚点(值/单位列不应有)
+    assert html.count("data-sortidx=") == 2
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_header_links_inject_clickable_sort_anchors")
+
+
 def test_export_buttons_iframe_html_renders_three_uniform_actions():
     """测试导出区只渲染三个统一样式按钮"""
     html = _build_export_buttons_iframe_html(
@@ -463,6 +545,44 @@ def test_export_image():
     print("  [PASS] test_export_image")
 
 
+def test_image_header_layout_two_levels():
+    """
+    JPG 二级表头布局:一级分组为 baseline/各 candidate,二级为 值/Speedup;
+    baseline 单列(无 Speedup),candidate 跨两列(值 + Speedup);用例名无分组。
+    """
+    p1 = make_json_file({"a": 1.0}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"a": 0.5}, {"python_version": "3.13.0"})
+    p3 = make_json_file({"a": 0.4}, {"python_version": "3.14.0"})
+
+    base = load_benchmark(p1)
+    c1 = load_benchmark(p2)
+    c2 = load_benchmark(p3)
+    names = get_all_benchmark_names([base, c1, c2])
+    df, _ = build_comparison_df(base, [c1, c2], names)
+    specs = _flatten_df_for_export(df)
+
+    leaf, groups = _image_header_layout(specs, "用例名", "值", "趋势")
+
+    # 第 0 列是用例名(无分组)
+    assert leaf[0] == "用例名"
+    # 三个一级分组:baseline + 两个 candidate
+    assert len(groups) == 3
+    base_g, c1_g, c2_g = groups
+    # baseline 单列分组(只有"值")
+    assert base_g[1] == base_g[2]
+    assert leaf[base_g[1]] == "值"
+    # candidate 跨两列:值 + Speedup
+    assert c1_g[2] - c1_g[1] == 1
+    assert leaf[c1_g[1]] == "值" and leaf[c1_g[2]] == "Speedup"
+    assert c2_g[2] - c2_g[1] == 1
+    # 分组名取候选名称
+    assert c1_g[0] == c1.name and c2_g[0] == c2.name
+
+    for p in (p1, p2, p3):
+        os.unlink(p)
+    print("  [PASS] test_image_header_layout_two_levels")
+
+
 def test_export_image_long_names_do_not_crash():
     """
     issue #3:候选名/用例名很长时,JPG 导出不应让文字戳出单元格。
@@ -507,9 +627,12 @@ if __name__ == "__main__":
     test_export_markdown_sort_parameter_does_not_mutate_table_df()
     test_build_gmean_row()
     test_comparison_table_html_structure()
+    test_sort_keeps_gmean_last_and_export_in_sync()
+    test_header_links_inject_clickable_sort_anchors()
     test_export_buttons_iframe_html_renders_three_uniform_actions()
     test_render_export_buttons_uses_iframe_for_button_group()
     test_geomean_speedup()
+    test_image_header_layout_two_levels()
     test_export_image()
     test_export_image_long_names_do_not_crash()
     print("\nAll tests passed!")

@@ -10,6 +10,7 @@
 import sys
 import io
 import os
+import re
 import json
 import base64
 import statistics
@@ -20,6 +21,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # =============================================================================
 # Data Layer — 纯函数，无 Streamlit 依赖
@@ -414,13 +416,17 @@ def render_comparison_table_html(
     improve_thresh: float,
     regress_thresh: float,
     append_gmean: bool = True,
+    header_links: Optional[dict] = None,
 ) -> str:
     """
     将对比表渲染为 HTML 字符串。相比 st.dataframe(glide canvas)，HTML 表格能：
     - 完整渲染二级表头（含被固定的 baseline，借助 colspan）
     - 用 CSS position:sticky 固定左侧列，且保留两级表头
     - 精确控制列宽、让一级表头居中
-    - 在最底部常驻几何平均行（HTML 表格无交互排序，行序恒定）
+    - 在最底部常驻几何平均行（数据已在外部排序，几何平均追加在末尾不参与排序）
+
+    header_links: {列下标: (sort_idx, 箭头)} —— 给二级表头注入可点排序锚点。
+        锚点带 data-sortidx 属性，由外部 JS 桥接到隐藏的 Streamlit 按钮(平滑重跑)。
     """
     if append_gmean and not df.empty and speedup_cols:
         df = pd.concat([df, build_gmean_row(df, speedup_cols)], ignore_index=True)
@@ -450,6 +456,8 @@ def render_comparison_table_html(
         {c: "{:.3f}" for c in speedup_cols}, na_rep="—"
     )
 
+    # 一级表头行高（px），用作二级表头 sticky 的 top 偏移，使两行表头都吸顶不重叠
+    h0 = 30
     table_styles: list[dict] = [
         {"selector": "", "props": [
             ("border-collapse", "collapse"),
@@ -460,21 +468,26 @@ def render_comparison_table_html(
             ("font-size", "13px"),
             ("color", "#1a1a1a"),
         ]},
+        # 一级表头：吸顶 top:0，固定行高
         {"selector": ".col_heading.level0", "props": [
             ("text-align", "center"),
             ("background-color", "#e6e9f0"),
             ("border", "1px solid #cfd4dc"),
             ("padding", "5px 6px"),
+            ("box-sizing", "border-box"),
+            ("height", f"{h0}px"),
+            ("position", "sticky"),
+            ("top", "0"),
+            ("z-index", "2"),
         ]},
+        # 二级表头：吸顶在一级表头下方 top:h0
         {"selector": ".col_heading.level1", "props": [
             ("text-align", "center"),
             ("background-color", "#f0f2f6"),
             ("border", "1px solid #cfd4dc"),
             ("padding", "5px 6px"),
-        ]},
-        {"selector": "thead th", "props": [
             ("position", "sticky"),
-            ("top", "0"),
+            ("top", f"{h0}px"),
             ("z-index", "2"),
         ]},
         {"selector": "tbody td", "props": [
@@ -498,18 +511,25 @@ def render_comparison_table_html(
             table_styles.append({"selector": f"tbody td.col{i}", "props": [
                 ("text-align", "right"),
             ]})
-        # 固定列：用例名 + baseline 值/单位 用 sticky 钉在左侧
+        # 固定列：用例名 + baseline 值/单位 同时吸顶+贴左（角落），z-index 最高，
+        # 两级表头各自用正确的 top（level0:0 / level1:h0），用更高特异性盖过通用规则。
         if i < _COMPARISON_PINNED:
             table_styles.append({"selector": f"tbody .col{i}", "props": [
                 ("position", "sticky"),
                 ("left", f"{off}px"),
                 ("z-index", "1"),
             ]})
-            table_styles.append({"selector": f"thead .col{i}", "props": [
+            table_styles.append({"selector": f"thead .col_heading.level0.col{i}", "props": [
                 ("position", "sticky"),
                 ("left", f"{off}px"),
                 ("top", "0"),
-                ("z-index", "3"),
+                ("z-index", "4"),
+            ]})
+            table_styles.append({"selector": f"thead .col_heading.level1.col{i}", "props": [
+                ("position", "sticky"),
+                ("left", f"{off}px"),
+                ("top", f"{h0}px"),
+                ("z-index", "4"),
             ]})
 
     styler = styler.set_table_styles(table_styles)
@@ -525,6 +545,24 @@ def render_comparison_table_html(
     html = styler.to_html()
     tag_end = html.find(">", html.find("<table")) + 1
     html = html[:tag_end] + colgroup + html[tag_end:]
+
+    # 给二级表头注入可点排序锚点：整格可点 + 升/降序箭头，带 data-sortidx 供 JS 桥接
+    if header_links:
+        for ci, (sort_idx, arrow) in header_links.items():
+            pattern = re.compile(
+                rf'(<th id="T_[0-9a-f]+_level1_col{ci}"[^>]*>)(.*?)(</th>)', re.S
+            )
+
+            def _repl(mo, sort_idx=sort_idx, arrow=arrow):
+                inner = mo.group(2)
+                anchor = (
+                    f'<a href="javascript:void(0)" data-sortidx="{sort_idx}" '
+                    'style="color:inherit;text-decoration:none;cursor:pointer;display:block;">'
+                    f"{inner}{arrow}</a>"
+                )
+                return mo.group(1) + anchor + mo.group(3)
+
+            html = pattern.sub(_repl, html, count=1)
 
     return (
         '<div style="overflow:auto; max-height:600px; '
@@ -780,28 +818,79 @@ _IMAGE_TEXT_MAP = {
 
 
 def _setup_matplotlib_cjk():
-    """为 matplotlib 配置 CJK 字体，返回是否成功"""
+    """为 matplotlib 配置 CJK 字体，返回是否真正可渲染中文"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.font_manager as fm
+    from matplotlib.ft2font import FT2Font
 
+    # 仅接受同时覆盖中文与拉丁字符的字体（CJK-only 字体会让 ASCII 变方框，
+    # Latin-only 字体则中文变方框），从而避免误判与混排缺字
     cjk_names = [
-        "Droid Sans", "WenQuanYi Micro Hei", "Noto Sans CJK SC",
-        "Noto Sans SC", "Source Han Sans SC", "SimHei",
-        "Microsoft YaHei", "AR PL UMing CN",
+        "WenQuanYi Micro Hei", "Noto Sans CJK SC", "Noto Sans SC",
+        "Source Han Sans SC", "SimHei", "Microsoft YaHei", "AR PL UMing CN",
     ]
     for name in cjk_names:
         try:
             fp = fm.findfont(fm.FontProperties(family=name), fallback_to_default=False)
-            if fp and "lastresort" not in str(fp).lower():
-                plt.rcParams["font.sans-serif"] = [name] + plt.rcParams.get(
-                    "font.sans-serif", []
-                )
-                return True
+            if not fp or "lastresort" in str(fp).lower():
+                continue
+            font = FT2Font(fp)
+            if font.get_char_index(ord("中")) == 0 or font.get_char_index(ord("a")) == 0:
+                continue
+            plt.rcParams["font.sans-serif"] = [name] + plt.rcParams.get(
+                "font.sans-serif", []
+            )
+            return True
         except Exception:
             pass
     return False
+
+
+def _image_header_layout(
+    specs: list[dict],
+    name_label: str,
+    mean_label: str,
+    trend_label: str,
+) -> tuple[list[str], list[tuple]]:
+    """
+    由导出列规格推导 JPG 的二级表头布局。
+    返回 (leaf_headers, groups)：
+    - leaf_headers：每列的二级标签(值/Speedup 或 用例名/趋势)
+    - groups：[(分组名, 起始列, 结束列), ...]，一级分组(baseline / 各 candidate)需跨列居中。
+      baseline 只有"值"一列(无 Speedup) → 单列分组；candidate 含"值"+Speedup → 跨两列。
+      用例名 / 趋势 无一级分组，不计入 groups。
+    """
+    leaf_map = {"Benchmark": name_label, "Trend": trend_label}
+    leaf_headers: list[str] = []
+    groups: list[tuple] = []
+    ci = 0
+    i = 0
+    while i < len(specs):
+        s = specs[i]
+        if s["type"] == "value_unit":
+            start = ci
+            leaf_headers.append(mean_label)
+            i += 1
+            ci += 1
+            end = start
+            while i < len(specs) and specs[i]["type"] == "speedup":
+                leaf_headers.append("Speedup")
+                i += 1
+                ci += 1
+                end += 1
+            groups.append((s["header"], start, end))
+        elif s["type"] == "speedup":
+            leaf_headers.append("Speedup")
+            groups.append((s["header"], ci, ci))
+            i += 1
+            ci += 1
+        else:  # raw: 用例名 / 趋势
+            leaf_headers.append(leaf_map.get(s["header"], s["header"]))
+            i += 1
+            ci += 1
+    return leaf_headers, groups
 
 
 def export_df_to_image(
@@ -816,16 +905,25 @@ def export_df_to_image(
     """将表格导出为 JPG 图片（matplotlib 渲染，Speedup 列着色）"""
     import matplotlib.pyplot as plt
 
-    _setup_matplotlib_cjk()
+    # 仅在有 CJK 字体时用中文表头（与界面表格一致），否则退回 ASCII，避免缺字变方框
+    cjk_ok = _setup_matplotlib_cjk()
+    name_label = "用例名" if cjk_ok else "Benchmark"
+    mean_label = "值" if cjk_ok else "Mean"
+    trend_label = "趋势" if cjk_ok else "Trend"
 
     export_df = _sort_df_for_export(df, export_sort_by, export_sort_ascending)
     specs = _flatten_df_for_export(export_df)
-    headers = [s["header"] for s in specs]
-    n_cols = len(headers)
+    n_cols = len(specs)
 
-    # Build cell text and colors
-    all_text = [headers]
-    all_colors = [["#4472C4"] * n_cols]  # header row: blue
+    # 解析二级表头：一级 = 分组名(baseline / 各 candidate)，二级 = 值 / Speedup。
+    leaf_headers, groups = _image_header_layout(
+        specs, name_label, mean_label, trend_label
+    )
+
+    n_header = 2
+    # 表头两行：行0 一级分组名(留空，稍后 overlay 居中绘制)，行1 二级标签
+    all_text = [[""] * n_cols, list(leaf_headers)]
+    all_colors = [["#4472C4"] * n_cols, ["#4472C4"] * n_cols]
 
     for _, row in export_df.iterrows():
         row_text = []
@@ -870,28 +968,39 @@ def export_df_to_image(
 
     # 截断过长文本，避免单列被撑得过宽；保证文字不溢出单元格
     max_chars = 28
-    for r in range(total_rows):
-        for c in range(n_cols):
-            s = str(all_text[r][c])
-            if len(s) > max_chars:
-                all_text[r][c] = s[: max_chars - 1] + "…"
 
-    # 按各列最长内容（含边距）分配列宽，列宽与字符数成正比，从根本上防止文字戳出
+    def _trunc(text: str) -> str:
+        return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
+
+    for r in range(n_header, total_rows):
+        for c in range(n_cols):
+            all_text[r][c] = _trunc(str(all_text[r][c]))
+    groups = [(_trunc(label), a, b) for (label, a, b) in groups]
+
+    # 按各列最长内容（数据 + 二级表头，含边距）分配列宽
     col_chars = [
-        max(len(str(all_text[r][c])) for r in range(total_rows)) + 2
+        max(len(str(all_text[r][c])) for r in range(1, total_rows)) + 2
         for c in range(n_cols)
     ]
+    # 保证每个分组跨列总宽能容纳居中的一级分组名
+    for (label, a, b) in groups:
+        need = len(label) + 2
+        span = sum(col_chars[a : b + 1])
+        if need > span:
+            add = (need - span) / (b - a + 1)
+            for c in range(a, b + 1):
+                col_chars[c] += add
     total_chars = sum(col_chars) or 1
     col_widths = [c / total_chars for c in col_chars]
 
     # 图宽随内容总量伸缩，确保每列有足够绝对宽度容纳文字
     fig_w = max(8, total_chars * 0.13)
-    fig_h = max(3, total_rows * 0.42 + 0.8)
+    fig_h = max(3, total_rows * 0.4 + 0.7)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.axis("off")
 
     if baseline_label:
-        ax.set_title(f"Baseline: {baseline_label}", fontsize=10, loc="left", pad=12)
+        ax.set_title(f"Baseline: {baseline_label}", fontsize=10, loc="left", pad=10)
 
     table = ax.table(
         cellText=all_text,
@@ -899,19 +1008,53 @@ def export_df_to_image(
         colWidths=col_widths,
         cellLoc="center",
         loc="center",
+        bbox=[0, 0, 1, 1],
     )
-
-    # Header style: white bold text
-    for j in range(n_cols):
-        table[0, j].set_text_props(color="white", fontweight="bold", fontsize=9)
-
-    # Data rows
-    for i in range(1, total_rows):
-        for j in range(n_cols):
-            table[i, j].set_text_props(fontsize=8)
-
     table.auto_set_font_size(False)
-    table.scale(1, 1.35)
+
+    for r in range(n_header):
+        for c in range(n_cols):
+            table[r, c].set_text_props(color="white", fontweight="bold", fontsize=9)
+    for r in range(n_header, total_rows):
+        for c in range(n_cols):
+            table[r, c].set_text_props(fontsize=8)
+
+    # 列边界(轴坐标 0..1) 与行高，用于跨列/跨行居中绘制表头文字
+    xcum = [0.0]
+    for w in col_widths:
+        xcum.append(xcum[-1] + w)
+    row_h = 1.0 / total_rows
+
+    # 把组内边框染成与表头同色(蓝)，形成"跨列/跨行合并"观感，再居中 overlay 文字。
+    # 不用 visible_edges 隐藏边（会让填充单元格出现白色三角伪影）。
+    header_blue = "#4472C4"
+
+    # 一级分组：组内竖线隐形 + 分组中点居中绘制分组名
+    grouped_cols = set()
+    for (label, a, b) in groups:
+        grouped_cols.update(range(a, b + 1))
+        for c in range(a, b + 1):
+            table[0, c].set_edgecolor(header_blue)
+        xc = (xcum[a] + xcum[b + 1]) / 2
+        ax.text(
+            xc, 1.0 - row_h / 2, label,
+            ha="center", va="center", color="white", fontweight="bold",
+            fontsize=9, transform=ax.transAxes, zorder=5,
+        )
+
+    # 无分组的列(用例名/趋势)：两行表头竖向合并，居中 overlay 标签
+    for c in range(n_cols):
+        if c in grouped_cols:
+            continue
+        table[0, c].set_edgecolor(header_blue)
+        table[1, c].set_edgecolor(header_blue)
+        table[1, c].get_text().set_text("")
+        xc = (xcum[c] + xcum[c + 1]) / 2
+        ax.text(
+            xc, 1.0 - row_h, leaf_headers[c],
+            ha="center", va="center", color="white", fontweight="bold",
+            fontsize=9, transform=ax.transAxes, zorder=5,
+        )
 
     buf = io.BytesIO()
     fig.savefig(buf, format="jpg", bbox_inches="tight", dpi=150)
@@ -1145,24 +1288,102 @@ def render_tab_comparison(config: dict):
     col2.metric("候选数", len(candidates))
     col3.metric("当前显示", len(df_display))
 
+    # 点击表头排序（平滑：不整页刷新）。机制：表头是带 data-sortidx 的锚点，
+    # 由一个隐藏的 components iframe 内的 JS 把点击桥接到对应的隐藏 st.button，
+    # 触发常规 websocket 重跑。排序状态存 session_state，表格/柱状图/导出共用；
+    # 几何平均行追加在末尾、不参与排序。可排序列 = 用例名 + 各候选 Speedup。
+    ss = st.session_state
+    ss.setdefault("cmp_sort", "__name__")
+    ss.setdefault("cmp_asc", True)
+
+    sortable: list[tuple] = [("__name__", name_col)]
+    for cand in candidates:
+        col = (cand.name, "Speedup")
+        if col in df_display.columns:
+            sortable.append((cand.name, col))
+    valid_ids = {cid for cid, _ in sortable}
+    if ss.cmp_sort not in valid_ids:
+        ss.cmp_sort = "__name__"
+
+    # 隐藏的排序按钮：JS 点击它们 → 常规重跑。用离屏方式隐藏(display:none 可能不触发点击)
+    st.markdown(
+        "<style>[class*='st-key-cmp_sortbtn_']{position:absolute!important;"
+        "width:1px;height:1px;overflow:hidden;opacity:0;margin:-1px;}</style>",
+        unsafe_allow_html=True,
+    )
+    for k, (cid, _) in enumerate(sortable):
+        if st.button("sort", key=f"cmp_sortbtn_{k}"):
+            if ss.cmp_sort == cid:
+                ss.cmp_asc = not ss.cmp_asc
+            else:
+                ss.cmp_sort = cid
+                ss.cmp_asc = True
+
+    cur_sort = ss.cmp_sort
+    ascending = ss.cmp_asc
+    sort_col = next(col for cid, col in sortable if cid == cur_sort)
+
+    # 仅排序数据行；几何平均行在渲染/导出时再追加到末尾，故不受排序影响
+    df_sorted = _sort_df_for_export(df_display, sort_col, ascending)
+
+    # 表头 → 排序按钮下标 映射 + 当前方向箭头
+    id_to_k = {cid: k for k, (cid, _) in enumerate(sortable)}
+
+    def _arrow(col_id: str) -> str:
+        if col_id != cur_sort:
+            return ""
+        return " ▲" if ascending else " ▼"
+
+    header_links = {0: (id_to_k["__name__"], _arrow("__name__"))}
+    for i, col in enumerate(df_sorted.columns):
+        if col in set(speedup_cols) and col[0] in id_to_k:
+            header_links[i] = (id_to_k[col[0]], _arrow(col[0]))
+
+    st.caption("点击表头（用例名 / Speedup）排序")
+
     # HTML 表格渲染：二级表头 + 固定列(用例名/baseline) + 一级表头居中 + 底部几何平均行
     st.html(
         render_comparison_table_html(
-            df_display, speedup_cols, improve_t, regress_t
+            df_sorted, speedup_cols, improve_t, regress_t,
+            header_links=header_links,
         )
     )
 
-    # 导出按钮
-    if not df_display.empty:
+    # JS 桥：隐藏 iframe。用"事件委托"在父文档上挂一个常驻监听(只挂一次)，
+    # 凡点到带 data-sortidx 的表头锚点，就转发到对应隐藏按钮 → 常规重跑。
+    # 委托而非逐元素绑定：st.html 每次重跑会替换表头 DOM，逐元素绑定只对首批节点有效
+    # (导致"只有第一次点击生效")；委托挂在常驻的 document 上，对后续新节点同样生效。
+    components.html(
+        """
+        <script>
+        const pdoc = window.parent.document;
+        if (!pdoc.__cmpSortDelegated) {
+          pdoc.__cmpSortDelegated = true;
+          pdoc.addEventListener('click', function (e) {
+            const a = e.target.closest && e.target.closest('a[data-sortidx]');
+            if (!a) return;
+            e.preventDefault();
+            const k = a.getAttribute('data-sortidx');
+            const c = pdoc.querySelector('.st-key-cmp_sortbtn_' + k);
+            if (c) { const b = c.querySelector('button'); if (b) b.click(); }
+          }, true);
+        }
+        </script>
+        """,
+        height=0,
+    )
+
+    # 导出按钮（沿用同一排序结果，故导出顺序与表格一致）
+    if not df_sorted.empty:
         _render_export_buttons(
-            df_display, speedup_cols, improve_t, regress_t,
+            df_sorted, speedup_cols, improve_t, regress_t,
             baseline.name, "comparison",
         )
 
-    # Speedup 柱状图（复用选中用例）
-    if not df_display.empty and speedup_cols:
+    # Speedup 柱状图（复用选中用例 + 同一排序）
+    if not df_sorted.empty and speedup_cols:
         st.subheader("Speedup 柱状图")
-        chart_df = df_display.set_index(name_col)[speedup_cols]
+        chart_df = df_sorted.set_index(name_col)[speedup_cols]
         chart_df.columns = [c[0] for c in chart_df.columns]
         st.bar_chart(chart_df, horizontal=True)
 
