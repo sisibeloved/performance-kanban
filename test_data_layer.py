@@ -7,6 +7,7 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
+import perf_kanban
 from perf_kanban import (
     load_benchmark,
     compute_speedup,
@@ -17,11 +18,36 @@ from perf_kanban import (
     get_all_benchmark_names,
     export_df_to_markdown,
     export_df_to_image,
+    apply_speedup_styling,
     _geomean_speedup,
     _comparison_column_config,
-    _build_markdown_clipboard_button_html,
-    _build_image_clipboard_button_html,
+    _build_export_buttons_iframe_html,
 )
+
+
+class _FakeExportColumn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeExportStreamlit:
+    def __init__(self):
+        self.iframes = []
+
+    def subheader(self, *args, **kwargs):
+        pass
+
+    def columns(self, count):
+        return [_FakeExportColumn() for _ in range(count)]
+
+    def download_button(self, *args, **kwargs):
+        raise AssertionError("download buttons should be rendered by the iframe")
+
+    def iframe(self, src, **kwargs):
+        self.iframes.append((src, kwargs))
 
 
 def make_json_file(benchmarks_dict: dict, metadata: dict = None) -> str:
@@ -280,29 +306,87 @@ def test_comparison_column_config_pins_name_and_baseline_columns():
     print("  [PASS] test_comparison_column_config_pins_name_and_baseline_columns")
 
 
-def test_markdown_clipboard_button_html_uses_safe_text_payload():
-    """测试 Markdown 剪贴板按钮使用安全 JS 文本载荷"""
-    md = 'quote " and </script> marker'
-    button_html = _build_markdown_clipboard_button_html(md)
+def test_speedup_styling_centers_top_level_column_headers():
+    """测试一级列头居中显示"""
+    p1 = make_json_file({"a": 1.0})
+    p2 = make_json_file({"a": 0.5})
 
-    assert "复制 Markdown 到剪贴板" in button_html
-    assert "navigator.clipboard.writeText" in button_html
-    assert 'quote \\" and <\\/script> marker' in button_html
-    assert "</script> marker" not in button_html
-    print("  [PASS] test_markdown_clipboard_button_html_uses_safe_text_payload")
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    df, speedup_cols = build_comparison_df(base, [cand], ["a"])
+
+    styled = apply_speedup_styling(df, 1.05, 0.95, speedup_cols)
+    styled._compute()
+    styles = styled._translate(False, False)
+
+    top_level_header_styles = [
+        style
+        for style in styles["table_styles"]
+        if style["selector"] == ".col_heading.level0"
+    ]
+    assert top_level_header_styles == [
+        {"selector": ".col_heading.level0", "props": [("text-align", "center")]}
+    ]
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_speedup_styling_centers_top_level_column_headers")
 
 
-def test_image_clipboard_button_html_uses_image_clipboard_item():
-    """测试 JPG 剪贴板按钮使用图片 ClipboardItem"""
-    button_html = _build_image_clipboard_button_html(b"\xff\xd8\xffabc")
+def test_export_buttons_iframe_html_renders_three_uniform_actions():
+    """测试导出区只渲染三个统一样式按钮"""
+    html = _build_export_buttons_iframe_html(
+        'quote " and </script> marker',
+        b"\xff\xd8\xffabc",
+        "comparison.md",
+        "comparison.jpg",
+    )
 
-    assert "复制 JPG 到剪贴板" in button_html
-    assert "navigator.clipboard.write" in button_html
-    assert "ClipboardItem" in button_html
-    assert "image/jpeg" in button_html
-    assert "image/png" in button_html
-    assert "/9j/YWJj" in button_html
-    print("  [PASS] test_image_clipboard_button_html_uses_image_clipboard_item")
+    assert html.count('class="export-action-button"') == 3
+    assert "导出 Markdown" in html
+    assert "复制 Markdown 到剪贴板" in html
+    assert "导出 JPG" in html
+    assert "复制 JPG" not in html
+    assert "ClipboardItem" not in html
+    assert "navigator.clipboard.writeText" in html
+    assert "download=\"comparison.md\"" in html
+    assert "download=\"comparison.jpg\"" in html
+    assert "data:text/markdown;base64," in html
+    assert "data:image/jpeg;base64,/9j/YWJj" in html
+    assert 'quote \\" and <\\/script> marker' in html
+    assert "</script> marker" not in html
+    print("  [PASS] test_export_buttons_iframe_html_renders_three_uniform_actions")
+
+
+def test_render_export_buttons_uses_iframe_for_button_group():
+    """测试导出区用 st.iframe 渲染统一按钮组"""
+    fake_st = _FakeExportStreamlit()
+    original_st = perf_kanban.st
+    original_markdown = perf_kanban.export_df_to_markdown
+    original_image = perf_kanban.export_df_to_image
+    perf_kanban.st = fake_st
+    perf_kanban.export_df_to_markdown = lambda *args, **kwargs: "markdown"
+    perf_kanban.export_df_to_image = lambda *args, **kwargs: b"\xff\xd8\xffabc"
+
+    try:
+        perf_kanban._render_export_buttons(
+            df=None,
+            speedup_cols=[],
+            improve_thresh=1.05,
+            regress_thresh=0.95,
+            baseline_label="",
+            file_prefix="comparison",
+        )
+    finally:
+        perf_kanban.st = original_st
+        perf_kanban.export_df_to_markdown = original_markdown
+        perf_kanban.export_df_to_image = original_image
+
+    assert len(fake_st.iframes) == 1
+    iframe_html, iframe_kwargs = fake_st.iframes[0]
+    assert "复制 JPG" not in iframe_html
+    assert iframe_kwargs["height"] > 0
+    print("  [PASS] test_render_export_buttons_uses_iframe_for_button_group")
 
 
 def test_geomean_speedup():
@@ -361,8 +445,9 @@ if __name__ == "__main__":
     test_export_markdown_trend()
     test_export_markdown_sort_parameter_does_not_mutate_table_df()
     test_comparison_column_config_pins_name_and_baseline_columns()
-    test_markdown_clipboard_button_html_uses_safe_text_payload()
-    test_image_clipboard_button_html_uses_image_clipboard_item()
+    test_speedup_styling_centers_top_level_column_headers()
+    test_export_buttons_iframe_html_renders_three_uniform_actions()
+    test_render_export_buttons_uses_iframe_for_button_group()
     test_geomean_speedup()
     test_export_image()
     print("\nAll tests passed!")

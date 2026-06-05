@@ -20,7 +20,6 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 # =============================================================================
 # Data Layer — 纯函数，无 Streamlit 依赖
@@ -352,6 +351,14 @@ def apply_speedup_styling(
         return ["" for _ in col]
 
     styler = styler.apply(_style_col)
+    styler = styler.set_table_styles(
+        [
+            {
+                "selector": ".col_heading.level0",
+                "props": [("text-align", "center")],
+            }
+        ]
+    )
 
     # 列宽：用例名宽，值/单位窄，Speedup 适中
     col_widths = {}
@@ -492,27 +499,62 @@ def _js_literal(value: str) -> str:
     return json.dumps(value).replace("</", "<\\/")
 
 
-def _build_markdown_clipboard_button_html(markdown_text: str) -> str:
-    """Build a browser-side button that copies Markdown text to the clipboard."""
+def _build_export_buttons_iframe_html(
+    markdown_text: str,
+    image_bytes: bytes,
+    markdown_file_name: str,
+    image_file_name: str,
+) -> str:
+    """Build a browser-side export button group for downloads and Markdown copy."""
+    markdown_b64 = base64.b64encode(markdown_text.encode("utf-8")).decode("ascii")
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
     markdown_literal = _js_literal(markdown_text)
+    markdown_name = _js_literal(markdown_file_name)[1:-1]
+    image_name = _js_literal(image_file_name)[1:-1]
     return f"""
-<button id="copy-md" class="clipboard-copy-button">复制 Markdown 到剪贴板</button>
-<span id="copy-md-status" class="clipboard-copy-status"></span>
+<div class="export-actions">
+  <a
+    class="export-action-button"
+    download="{markdown_name}"
+    href="data:text/markdown;base64,{markdown_b64}"
+  >导出 Markdown</a>
+  <button id="copy-md" class="export-action-button" type="button">
+    复制 Markdown 到剪贴板
+  </button>
+  <a
+    class="export-action-button"
+    download="{image_name}"
+    href="data:image/jpeg;base64,{image_b64}"
+  >导出 JPG</a>
+  <span id="copy-md-status" class="export-action-status"></span>
+</div>
 <style>
-  .clipboard-copy-button {{
+  body {{
+    margin: 0;
+  }}
+  .export-actions {{
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }}
+  .export-action-button {{
+    appearance: none;
     border: 1px solid #d1d5db;
     border-radius: 6px;
     background: #ffffff;
     color: #111827;
     cursor: pointer;
+    display: inline-flex;
     font: 14px sans-serif;
+    line-height: 1.2;
     padding: 0.45rem 0.75rem;
+    text-decoration: none;
   }}
-  .clipboard-copy-button:hover {{ border-color: #9ca3af; }}
-  .clipboard-copy-status {{
+  .export-action-button:hover {{ border-color: #9ca3af; }}
+  .export-action-status {{
     color: #4b5563;
     font: 13px sans-serif;
-    margin-left: 0.5rem;
   }}
 </style>
 <script>
@@ -523,96 +565,6 @@ def _build_markdown_clipboard_button_html(markdown_text: str) -> str:
   button.addEventListener("click", async () => {{
     try {{
       await navigator.clipboard.writeText(markdown);
-      status.textContent = "已复制";
-    }} catch (error) {{
-      status.textContent = "复制失败";
-    }}
-  }});
-}})();
-</script>
-"""
-
-
-def _build_image_clipboard_button_html(image_bytes: bytes) -> str:
-    """Build a browser-side button that copies the exported image to the clipboard."""
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
-    image_literal = _js_literal(image_b64)
-    return f"""
-<button id="copy-jpg" class="clipboard-copy-button">复制 JPG 到剪贴板</button>
-<span id="copy-jpg-status" class="clipboard-copy-status"></span>
-<style>
-  .clipboard-copy-button {{
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    background: #ffffff;
-    color: #111827;
-    cursor: pointer;
-    font: 14px sans-serif;
-    padding: 0.45rem 0.75rem;
-  }}
-  .clipboard-copy-button:hover {{ border-color: #9ca3af; }}
-  .clipboard-copy-status {{
-    color: #4b5563;
-    font: 13px sans-serif;
-    margin-left: 0.5rem;
-  }}
-</style>
-<script>
-(() => {{
-  const imageBase64 = {image_literal};
-  const button = document.getElementById("copy-jpg");
-  const status = document.getElementById("copy-jpg-status");
-
-  function base64ToBlob(base64, mimeType) {{
-    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-    return new Blob([bytes], {{ type: mimeType }});
-  }}
-
-  async function jpegToPngBlob(base64) {{
-    const image = new Image();
-    image.src = "data:image/jpeg;base64," + base64;
-    await image.decode();
-    const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    canvas.getContext("2d").drawImage(image, 0, 0);
-    return new Promise((resolve, reject) => {{
-      canvas.toBlob((blob) => {{
-        if (blob) {{
-          resolve(blob);
-        }} else {{
-          reject(new Error("PNG conversion failed"));
-        }}
-      }}, "image/png");
-    }});
-  }}
-
-  async function copyImage() {{
-    const jpegBlob = base64ToBlob(imageBase64, "image/jpeg");
-    if (!window.ClipboardItem) {{
-      throw new Error("ClipboardItem is not supported");
-    }}
-
-    if (!ClipboardItem.supports || ClipboardItem.supports("image/jpeg")) {{
-      try {{
-        await navigator.clipboard.write([
-          new ClipboardItem({{ "image/jpeg": jpegBlob }})
-        ]);
-        return;
-      }} catch (error) {{
-        // Fall back below for browsers that only accept PNG image clipboard data.
-      }}
-    }}
-
-    const pngBlob = await jpegToPngBlob(imageBase64);
-    await navigator.clipboard.write([
-      new ClipboardItem({{ "image/png": pngBlob }})
-    ]);
-  }}
-
-  button.addEventListener("click", async () => {{
-    try {{
-      await copyImage();
       status.textContent = "已复制";
     }} catch (error) {{
       status.textContent = "复制失败";
@@ -848,10 +800,18 @@ def _render_export_buttons(
 ):
     """渲染导出按钮（Markdown + JPG）"""
     st.subheader("导出")
-    col_md, col_jpg = st.columns(2)
+    md_text = export_df_to_markdown(
+        df,
+        speedup_cols,
+        improve_thresh,
+        regress_thresh,
+        baseline_label,
+        export_sort_by=export_sort_by,
+        export_sort_ascending=export_sort_ascending,
+    )
 
-    with col_md:
-        md_text = export_df_to_markdown(
+    try:
+        img_bytes = export_df_to_image(
             df,
             speedup_cols,
             improve_thresh,
@@ -860,40 +820,19 @@ def _render_export_buttons(
             export_sort_by=export_sort_by,
             export_sort_ascending=export_sort_ascending,
         )
-        st.download_button(
-            "导出 Markdown",
-            data=md_text,
-            file_name=f"{file_prefix}.md",
-            mime="text/markdown",
-        )
-        components.html(
-            _build_markdown_clipboard_button_html(md_text),
-            height=44,
-        )
+    except Exception as e:
+        st.warning(f"JPG 导出失败（需要 matplotlib）: {e}")
+        return
 
-    with col_jpg:
-        try:
-            img_bytes = export_df_to_image(
-                df,
-                speedup_cols,
-                improve_thresh,
-                regress_thresh,
-                baseline_label,
-                export_sort_by=export_sort_by,
-                export_sort_ascending=export_sort_ascending,
-            )
-            st.download_button(
-                "导出 JPG",
-                data=img_bytes,
-                file_name=f"{file_prefix}.jpg",
-                mime="image/jpeg",
-            )
-            components.html(
-                _build_image_clipboard_button_html(img_bytes),
-                height=44,
-            )
-        except Exception as e:
-            st.warning(f"JPG 导出失败（需要 matplotlib）: {e}")
+    st.iframe(
+        _build_export_buttons_iframe_html(
+            md_text,
+            img_bytes,
+            f"{file_prefix}.md",
+            f"{file_prefix}.jpg",
+        ),
+        height=48,
+    )
 
 
 # =============================================================================
