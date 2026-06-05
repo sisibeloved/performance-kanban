@@ -105,6 +105,11 @@ PID=$(ss -ltnp | grep ':8501' | grep -oP 'pid=\K[0-9]+' | head -1); kill "$PID"
 - 排序在**服务端**做(`_sort_df_for_export`,稳定排序),表格/柱状图/导出共用同一
   `df_sorted`;几何平均在排序后才追加 → 永远置底。可排序列 = 用例名 + 各候选 Speedup
   (值/单位是带单位的格式化字符串、跨行单位不一,不参与排序)。
+- **传给 `st.bar_chart` 的 DataFrame,索引名/列名必须是普通字符串**,绝不能把
+  MultiIndex 元组(如 `('', '用例名')`)当索引名——Vega-Lite 会把它当字段访问路径解析、
+  抛 `Access path missing closing bracket`,**该异常会中断整次重跑渲染**,表现成
+  "其它交互(如点击表头排序)莫名失效"。构建图表数据用 `build_speedup_chart_df`。
+  (issue #4 的真凶;排查时务必看浏览器 Console,别只盯着出问题的那个功能。)
 
 ---
 

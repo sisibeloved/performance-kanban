@@ -6,6 +6,14 @@
 
 ---
 
+## [0.3.5] - 2026-06-05
+
+### 修复
+
+- **表头排序在部署环境失效**(issue #4)：根因是 Speedup 柱状图把 MultiIndex 元组 `('', '用例名')` 当作索引名传给 `st.bar_chart`，Vega-Lite 将其解析为字段访问路径并抛 `Access path missing closing bracket`，该异常中断了整次重跑渲染，连带使点击表头排序看似无反应。改为用普通字符串索引名/列名构建图表数据(`build_speedup_chart_df`)
+
+---
+
 ## [0.3.4] - 2026-06-05
 
 ### 新增

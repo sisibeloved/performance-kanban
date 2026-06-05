@@ -22,6 +22,7 @@ from perf_kanban import (
     apply_speedup_styling,
     _geomean_speedup,
     build_gmean_row,
+    build_speedup_chart_df,
     render_comparison_table_html,
     _build_export_buttons_iframe_html,
     _flatten_df_for_export,
@@ -409,6 +410,35 @@ def test_sort_keeps_gmean_last_and_export_in_sync():
     print("  [PASS] test_sort_keeps_gmean_last_and_export_in_sync")
 
 
+def test_speedup_chart_df_has_no_tuple_field_names():
+    """
+    issue #4:柱状图 DataFrame 的索引名/列名必须是普通字符串，不能是 MultiIndex 元组
+    (如 ('', '用例名'))——否则 Vega-Lite 解析字段路径报错、中断重跑、排序看似失效。
+    """
+    p1 = make_json_file({"a": 1.0, "b": 1.0}, {"python_version": "3.12.0"})
+    p2 = make_json_file({"a": 0.5, "b": 2.0}, {"python_version": "3.13.0"})
+
+    base = load_benchmark(p1)
+    cand = load_benchmark(p2)
+    names = get_all_benchmark_names([base, cand])
+    df, speedup_cols = build_comparison_df(base, [cand], names)
+
+    chart_df = build_speedup_chart_df(df, speedup_cols)
+
+    # 索引名是字符串(不是元组)
+    assert chart_df.index.name == "用例名"
+    assert isinstance(chart_df.index.name, str)
+    # 所有列名都是字符串(不是元组)
+    assert all(isinstance(c, str) for c in chart_df.columns)
+    # 列为各候选 Speedup，值正确(a: 2.0, b: 0.5)
+    assert chart_df.loc["a", cand.name] == 2.0
+    assert chart_df.loc["b", cand.name] == 0.5
+
+    os.unlink(p1)
+    os.unlink(p2)
+    print("  [PASS] test_speedup_chart_df_has_no_tuple_field_names")
+
+
 def test_header_links_inject_clickable_sort_anchors():
     """
     点击表头排序:render_comparison_table_html 给指定二级表头列注入可点锚点
@@ -628,6 +658,7 @@ if __name__ == "__main__":
     test_build_gmean_row()
     test_comparison_table_html_structure()
     test_sort_keeps_gmean_last_and_export_in_sync()
+    test_speedup_chart_df_has_no_tuple_field_names()
     test_header_links_inject_clickable_sort_anchors()
     test_export_buttons_iframe_html_renders_three_uniform_actions()
     test_render_export_buttons_uses_iframe_for_button_group()

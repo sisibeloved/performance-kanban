@@ -410,6 +410,22 @@ def _col_width(col: tuple | str) -> int:
     return _COMPARISON_COL_WIDTHS.get(sub, 100)
 
 
+def build_speedup_chart_df(
+    df: pd.DataFrame,
+    speedup_cols: list[tuple],
+    name_col: tuple = ("", "用例名"),
+) -> pd.DataFrame:
+    """
+    构建 Speedup 柱状图用的 DataFrame：用例名为索引，各候选 Speedup 为列。
+    索引名与列名**必须是普通字符串**——若把 MultiIndex 元组(如 ('', '用例名'))
+    作为索引名传给 st.bar_chart，Vega-Lite 会将其当作字段访问路径解析并抛
+    "Access path missing closing bracket"，中断整次重跑渲染(连带使排序看似失效)。
+    """
+    chart_df = df[[name_col] + list(speedup_cols)].copy()
+    chart_df.columns = ["用例名"] + [c[0] for c in speedup_cols]
+    return chart_df.set_index("用例名")
+
+
 def render_comparison_table_html(
     df: pd.DataFrame,
     speedup_cols: list[tuple],
@@ -1383,9 +1399,10 @@ def render_tab_comparison(config: dict):
     # Speedup 柱状图（复用选中用例 + 同一排序）
     if not df_sorted.empty and speedup_cols:
         st.subheader("Speedup 柱状图")
-        chart_df = df_sorted.set_index(name_col)[speedup_cols]
-        chart_df.columns = [c[0] for c in chart_df.columns]
-        st.bar_chart(chart_df, horizontal=True)
+        st.bar_chart(
+            build_speedup_chart_df(df_sorted, speedup_cols, name_col),
+            horizontal=True,
+        )
 
 
 def render_tab_replacement(config: dict):
