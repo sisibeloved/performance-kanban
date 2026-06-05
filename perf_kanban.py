@@ -10,7 +10,6 @@
 import sys
 import io
 import os
-import re
 import json
 import base64
 import statistics
@@ -431,7 +430,6 @@ def render_comparison_table_html(
     improve_thresh: float,
     regress_thresh: float,
     append_gmean: bool = True,
-    header_links: Optional[dict] = None,
 ) -> str:
     """
     将对比表渲染为 HTML 字符串。相比 st.dataframe(glide canvas)，HTML 表格能：
@@ -439,9 +437,6 @@ def render_comparison_table_html(
     - 用 CSS position:sticky 固定左侧列，且保留两级表头
     - 精确控制列宽、让一级表头居中
     - 在最底部常驻几何平均行（数据已在外部排序，几何平均追加在末尾不参与排序）
-
-    header_links: {列下标: (sort_idx, 箭头)} —— 给二级表头注入可点排序锚点。
-        锚点带 data-sortidx 属性，由外部 JS 桥接到隐藏的 Streamlit 按钮(平滑重跑)。
     """
     if append_gmean and not df.empty and speedup_cols:
         df = pd.concat([df, build_gmean_row(df, speedup_cols)], ignore_index=True)
@@ -560,24 +555,6 @@ def render_comparison_table_html(
     html = styler.to_html()
     tag_end = html.find(">", html.find("<table")) + 1
     html = html[:tag_end] + colgroup + html[tag_end:]
-
-    # 给二级表头注入可点排序锚点：整格可点 + 升/降序箭头，带 data-sortidx 供 JS 桥接
-    if header_links:
-        for ci, (sort_idx, arrow) in header_links.items():
-            pattern = re.compile(
-                rf'(<th id="T_[0-9a-f]+_level1_col{ci}"[^>]*>)(.*?)(</th>)', re.S
-            )
-
-            def _repl(mo, sort_idx=sort_idx, arrow=arrow):
-                inner = mo.group(2)
-                anchor = (
-                    f'<a href="javascript:void(0)" data-sortidx="{sort_idx}" '
-                    'style="color:inherit;text-decoration:none;cursor:pointer;display:block;">'
-                    f"{inner}{arrow}</a>"
-                )
-                return mo.group(1) + anchor + mo.group(3)
-
-            html = pattern.sub(_repl, html, count=1)
 
     return (
         '<div style="overflow:auto; max-height:600px; '
@@ -1314,91 +1291,43 @@ def render_tab_comparison(config: dict):
     col2.metric("候选数", len(candidates))
     col3.metric("当前显示", len(df_display))
 
-    # 点击表头排序（平滑：不整页刷新）。机制：表头是带 data-sortidx 的锚点，
-    # 由一个隐藏的 components iframe 内的 JS 把点击桥接到对应的隐藏 st.button，
-    # 触发常规 websocket 重跑。排序状态存 session_state，表格/柱状图/导出共用；
-    # 几何平均行追加在末尾、不参与排序。可排序列 = 用例名 + 各候选 Speedup。
+    # 排序：用原生 Streamlit 按钮（一排），点击即常规重跑——平滑、零 JS、不依赖
+    # 组件 iframe/懒加载 chunk，反代/CDN/CSP 环境下也稳。排序状态存 session_state，
+    # 表格/柱状图/导出共用；几何平均行追加在末尾、不参与排序。
+    # 可排序列 = 用例名 + 各候选 Speedup（值/单位是带单位格式化串、跨行单位不一，不排）。
     ss = st.session_state
     ss.setdefault("cmp_sort", "__name__")
     ss.setdefault("cmp_asc", True)
 
-    sortable: list[tuple] = [("__name__", name_col)]
+    sortable: list[tuple] = [("__name__", "用例名", name_col)]
     for cand in candidates:
         col = (cand.name, "Speedup")
         if col in df_display.columns:
-            sortable.append((cand.name, col))
-    valid_ids = {cid for cid, _ in sortable}
-    if ss.cmp_sort not in valid_ids:
+            sortable.append((cand.name, f"{cand.name} Speedup", col))
+    if ss.cmp_sort not in {cid for cid, _, _ in sortable}:
         ss.cmp_sort = "__name__"
 
-    # 隐藏的排序按钮：JS 点击它们 → 常规重跑。用离屏方式隐藏(display:none 可能不触发点击)
-    st.markdown(
-        "<style>[class*='st-key-cmp_sortbtn_']{position:absolute!important;"
-        "width:1px;height:1px;overflow:hidden;opacity:0;margin:-1px;}</style>",
-        unsafe_allow_html=True,
-    )
-    for k, (cid, _) in enumerate(sortable):
-        if st.button("sort", key=f"cmp_sortbtn_{k}"):
+    st.caption("排序")
+    btn_cols = st.columns(len(sortable))
+    for (cid, label, _), bc in zip(sortable, btn_cols):
+        arrow = ("  ▲" if ss.cmp_asc else "  ▼") if cid == ss.cmp_sort else ""
+        if bc.button(label + arrow, key=f"cmp_sort_{cid}", use_container_width=True):
             if ss.cmp_sort == cid:
                 ss.cmp_asc = not ss.cmp_asc
             else:
                 ss.cmp_sort = cid
                 ss.cmp_asc = True
+            st.rerun()
 
     cur_sort = ss.cmp_sort
     ascending = ss.cmp_asc
-    sort_col = next(col for cid, col in sortable if cid == cur_sort)
+    sort_col = next(col for cid, _, col in sortable if cid == cur_sort)
 
     # 仅排序数据行；几何平均行在渲染/导出时再追加到末尾，故不受排序影响
     df_sorted = _sort_df_for_export(df_display, sort_col, ascending)
 
-    # 表头 → 排序按钮下标 映射 + 当前方向箭头
-    id_to_k = {cid: k for k, (cid, _) in enumerate(sortable)}
-
-    def _arrow(col_id: str) -> str:
-        if col_id != cur_sort:
-            return ""
-        return " ▲" if ascending else " ▼"
-
-    header_links = {0: (id_to_k["__name__"], _arrow("__name__"))}
-    for i, col in enumerate(df_sorted.columns):
-        if col in set(speedup_cols) and col[0] in id_to_k:
-            header_links[i] = (id_to_k[col[0]], _arrow(col[0]))
-
-    st.caption("点击表头（用例名 / Speedup）排序")
-
     # HTML 表格渲染：二级表头 + 固定列(用例名/baseline) + 一级表头居中 + 底部几何平均行
-    st.html(
-        render_comparison_table_html(
-            df_sorted, speedup_cols, improve_t, regress_t,
-            header_links=header_links,
-        )
-    )
-
-    # JS 桥：隐藏 iframe（用 st.iframe 而非已弃用的 st.components.v1.html）。
-    # 用"事件委托"在父文档上挂一个常驻监听(只挂一次)，凡点到带 data-sortidx 的
-    # 表头锚点，就转发到对应隐藏按钮 → 常规重跑。委托而非逐元素绑定：st.html 每次
-    # 重跑会替换表头 DOM，逐元素绑定只对首批节点有效(导致"只有第一次点击生效")；
-    # 委托挂在常驻的 document 上，对后续新节点同样生效。
-    st.iframe(
-        """
-        <script>
-        const pdoc = window.parent.document;
-        if (!pdoc.__cmpSortDelegated) {
-          pdoc.__cmpSortDelegated = true;
-          pdoc.addEventListener('click', function (e) {
-            const a = e.target.closest && e.target.closest('a[data-sortidx]');
-            if (!a) return;
-            e.preventDefault();
-            const k = a.getAttribute('data-sortidx');
-            const c = pdoc.querySelector('.st-key-cmp_sortbtn_' + k);
-            if (c) { const b = c.querySelector('button'); if (b) b.click(); }
-          }, true);
-        }
-        </script>
-        """,
-        height=1,  # st.iframe 要求正整数；1px 实际不可见（仅承载桥接脚本）
-    )
+    st.html(render_comparison_table_html(df_sorted, speedup_cols, improve_t, regress_t))
 
     # 导出按钮（沿用同一排序结果，故导出顺序与表格一致）
     if not df_sorted.empty:

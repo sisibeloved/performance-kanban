@@ -127,23 +127,20 @@ CHROME=/path/to/chrome python smoke_test.py     # 退出码 0=干净, 1=有报�
 
 ---
 
-## 5. 点击表头排序:HTML 表 + JS 桥(平滑,不整页刷新)
+## 5. 排序:原生 Streamlit 按钮(平滑、跨环境稳)
 
-HTML 表是静态的,没有原生点击排序。实现方式:
+排序用表格上方的一排**原生 `st.button`**(用例名 + 各候选 Speedup),点击即常规
+websocket 重跑;激活列的按钮带 ▲/▼,点同列切换升/降序。状态存 `st.session_state`,
+表格/柱状图/导出共用 `df_sorted`,几何平均排序后追加 → 永远置底。
 
-- 表头是带 `data-sortidx` 的锚点(`render_comparison_table_html` 的 `header_links` 注入)。
-- 渲染一批**离屏隐藏的 `st.button`**(key=`cmp_sortbtn_<k>`),点击它们走常规 websocket
-  重跑(**平滑,不整页刷新**)。排序状态存 `st.session_state`。
-- 一个 `height=0` 的 `components.html` iframe 内 JS,用 `window.parent.document` **事件委托**
-  把表头点击转发到对应隐藏按钮。
+**为什么不是"点击表头":** 曾用过 HTML 表头锚点 + 隐藏按钮 + `components/st.iframe`
+里 JS 事件委托桥接的"点表头"方案。本地能用,但**部署环境(反代/CDN/CSP)下挂掉**——
+它依赖懒加载的组件 iframe chunk + 同源访问父文档,目标环境出现大量
+`X is not defined`(chunk 没加载)导致整个前端交互失效(issue #4 之后的部署问题)。
+原生按钮不依赖任何 JS/iframe/懒加载 chunk,只要应用主体能加载就能用,故弃用 JS 桥。
 
-**关键坑(踩过):** 必须用**事件委托**(在常驻的 `document` 上挂一个监听),不能逐个
-锚点 `addEventListener`。因为每次重跑 `st.html` 会**替换表头 DOM 节点**,逐元素绑定只对
-首批节点有效 → 表现为"**只有第一次点击生效,之后失灵**"。委托挂在不变的 `document` 上
-(用 `document.__cmpSortDelegated` 防重复挂),对后续新节点同样有效。
+> 教训:**别为 Streamlit 写依赖跨 frame DOM 操作 / 懒加载 chunk 的交互 hack**——本地
+> 过、线上挂。能用原生控件(button/segmented_control/pills)就用原生。
 
-> ❌ 别用 `<a href="?sort=...">` 查询参数导航来排序——那会**整页刷新**(锚点导航
-> 触发整页重载),体验差。
-
-已用 headless Chrome + CDP 实测:连点两次(含切换升/降序)都生效,`window` sentinel
-跨点击存活 → 确认是平滑重跑而非整页刷新。
+已用 headless Chrome + CDP 实测:点排序按钮连点两次(切换升/降序)都生效、
+几何平均置底、控制台零报错。

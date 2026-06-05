@@ -439,42 +439,6 @@ def test_speedup_chart_df_has_no_tuple_field_names():
     print("  [PASS] test_speedup_chart_df_has_no_tuple_field_names")
 
 
-def test_header_links_inject_clickable_sort_anchors():
-    """
-    点击表头排序:render_comparison_table_html 给指定二级表头列注入可点锚点
-    (带 data-sortidx + 当前方向箭头);未指定的列(值/单位)不应有锚点。
-    """
-    p1 = make_json_file({"a": 1.0, "b": 1.0}, {"python_version": "3.12.0"})
-    p2 = make_json_file({"a": 0.5, "b": 2.0}, {"python_version": "3.13.0"})
-
-    base = load_benchmark(p1)
-    cand = load_benchmark(p2)
-    names = get_all_benchmark_names([base, cand])
-    df, speedup_cols = build_comparison_df(base, [cand], names)
-
-    # 用例名(col0)→按钮0 当前升序激活; candidate Speedup→按钮1
-    sp_idx = list(df.columns).index(speedup_cols[0])
-    header_links = {0: (0, " ▲"), sp_idx: (1, "")}
-    html = render_comparison_table_html(
-        df, speedup_cols, 1.05, 0.95, header_links=header_links
-    )
-
-    # 用例名表头被包成锚点并带升序箭头 + data-sortidx
-    assert 'data-sortidx="0"' in html
-    assert "用例名 ▲</a>" in html
-    # Speedup 表头被包成锚点
-    assert 'data-sortidx="1"' in html
-    assert "Speedup</a>" in html
-    # 整格可点
-    assert "display:block" in html
-    # 只有这两个可排序列被注入锚点(值/单位列不应有)
-    assert html.count("data-sortidx=") == 2
-
-    os.unlink(p1)
-    os.unlink(p2)
-    print("  [PASS] test_header_links_inject_clickable_sort_anchors")
-
-
 def test_export_buttons_iframe_html_renders_three_uniform_actions():
     """测试导出区只渲染三个统一样式按钮"""
     html = _build_export_buttons_iframe_html(
@@ -659,7 +623,6 @@ if __name__ == "__main__":
     test_comparison_table_html_structure()
     test_sort_keeps_gmean_last_and_export_in_sync()
     test_speedup_chart_df_has_no_tuple_field_names()
-    test_header_links_inject_clickable_sort_anchors()
     test_export_buttons_iframe_html_renders_three_uniform_actions()
     test_render_export_buttons_uses_iframe_for_button_group()
     test_geomean_speedup()
