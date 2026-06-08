@@ -373,16 +373,18 @@ def build_gmean_row(
     df: pd.DataFrame,
     speedup_cols: list[tuple],
     name_col: tuple = ("", "用例名"),
+    label: str = "几何平均",
 ) -> pd.DataFrame:
     """
     构建几何平均行（单行 DataFrame，列与对比表一致）。
-    几何平均仅填入 Speedup 列，其余列留空。
+    几何平均仅填入 Speedup 列，其余列留空。label 为用例名列显示的标签
+    （JPG 导出在无 CJK 字体时传 "Geomean" 以免中文变方框）。
     """
     gmeans = _geomean_speedup(df, speedup_cols)
     row: dict = {}
     for col in df.columns:
         if col == name_col:
-            row[col] = "几何平均"
+            row[col] = label
         elif col in speedup_cols:
             top = col[0]
             row[col] = round(gmeans[top], 4) if top in gmeans else None
@@ -904,6 +906,14 @@ def export_df_to_image(
     trend_label = "趋势" if cjk_ok else "Trend"
 
     export_df = _sort_df_for_export(df, export_sort_by, export_sort_ascending)
+    # 追加几何平均行（与界面表格一致，常驻最底、不参与排序）
+    has_gmean = not export_df.empty and bool(speedup_cols)
+    if has_gmean:
+        gm_label = "几何平均" if cjk_ok else "Geomean"
+        export_df = pd.concat(
+            [export_df, build_gmean_row(export_df, speedup_cols, label=gm_label)],
+            ignore_index=True,
+        )
     specs = _flatten_df_for_export(export_df)
     n_cols = len(specs)
 
@@ -1008,25 +1018,33 @@ def export_df_to_image(
         for c in range(n_cols):
             table[r, c].set_text_props(color="white", fontweight="bold", fontsize=9)
     for r in range(n_header, total_rows):
+        bold = has_gmean and r == total_rows - 1  # 几何平均行加粗
         for c in range(n_cols):
-            table[r, c].set_text_props(fontsize=8)
+            table[r, c].set_text_props(
+                fontsize=8, fontweight="bold" if bold else "normal"
+            )
 
-    # 列边界(轴坐标 0..1) 与行高，用于跨列/跨行居中绘制表头文字
+    # 列边界(轴坐标 0..1) 与行高，用于跨列居中绘制表头文字、手画分隔线
     xcum = [0.0]
     for w in col_widths:
         xcum.append(xcum[-1] + w)
     row_h = 1.0 / total_rows
+    y_lo = 1.0 - row_h  # 一级/二级表头分界线的 y
 
-    # 把组内边框染成与表头同色(蓝)，形成"跨列/跨行合并"观感，再居中 overlay 文字。
-    # 不用 visible_edges 隐藏边（会让填充单元格出现白色三角伪影）。
+    # 一级分组名居中 overlay。多列分组(候选: 值+Speedup)需要隐藏组内竖线以呈现"合并"，
+    # 但要保留**分组之间**和外框的黑色分隔线(否则一级表头蓝底看不到分隔)。
+    # 做法：把多列分组的 level-0 单元格边框染成蓝(隐形)，再手画该组外框(黑竖线+顶边)。
+    # 单列分组与无分组列(用例名/趋势)保持默认黑边，分隔线天然可见。
     header_blue = "#4472C4"
-
-    # 一级分组：组内竖线隐形 + 分组中点居中绘制分组名
-    grouped_cols = set()
     for (label, a, b) in groups:
-        grouped_cols.update(range(a, b + 1))
-        for c in range(a, b + 1):
-            table[0, c].set_edgecolor(header_blue)
+        if b > a:
+            for c in range(a, b + 1):
+                table[0, c].set_edgecolor(header_blue)
+            for x in (xcum[a], xcum[b + 1]):
+                ax.plot([x, x], [y_lo, 1.0], color="black", lw=1.0,
+                        transform=ax.transAxes, zorder=4)
+            ax.plot([xcum[a], xcum[b + 1]], [1.0, 1.0], color="black", lw=1.0,
+                    transform=ax.transAxes, zorder=4)
         xc = (xcum[a] + xcum[b + 1]) / 2
         ax.text(
             xc, 1.0 - row_h / 2, label,
@@ -1034,19 +1052,10 @@ def export_df_to_image(
             fontsize=9, transform=ax.transAxes, zorder=5,
         )
 
-    # 无分组的列(用例名/趋势)：两行表头竖向合并，居中 overlay 标签
-    for c in range(n_cols):
-        if c in grouped_cols:
-            continue
-        table[0, c].set_edgecolor(header_blue)
-        table[1, c].set_edgecolor(header_blue)
-        table[1, c].get_text().set_text("")
-        xc = (xcum[c] + xcum[c + 1]) / 2
-        ax.text(
-            xc, 1.0 - row_h, leaf_headers[c],
-            ha="center", va="center", color="white", fontweight="bold",
-            fontsize=9, transform=ax.transAxes, zorder=5,
-        )
+    # 几何平均行上方加一条略粗的分隔线（与界面表格一致，凸显置底）
+    if has_gmean:
+        ax.plot([0.0, 1.0], [row_h, row_h], color="#555555", lw=1.6,
+                transform=ax.transAxes, zorder=4)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="jpg", bbox_inches="tight", dpi=150)

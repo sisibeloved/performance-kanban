@@ -304,6 +304,8 @@ def test_build_gmean_row():
     assert len(row) == 1
     assert list(row.columns) == list(df.columns)
     assert row.iloc[0][name_col] == "几何平均"
+    # 自定义标签(JPG 导出无 CJK 字体时用 ASCII)
+    assert build_gmean_row(df, speedup_cols, label="Geomean").iloc[0][name_col] == "Geomean"
     # speedups: a=2.0, b=1.0, c=0.5 → geomean = 1.0
     assert abs(row.iloc[0][speedup_cols[0]] - 1.0) < 1e-6
     # baseline 值/单位 列留空
